@@ -30,19 +30,46 @@ main_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
+def calculate_rsi(prices, period=14):
+    if len(prices) < period + 1:
+        return 50.0
+    gains = []
+    losses = []
+    for i in range(1, len(prices)):
+        change = prices[i] - prices[i - 1]
+        if change >= 0:
+            gains.append(change)
+            losses.append(0)
+        else:
+            gains.append(0)
+            losses.append(abs(change))
+    
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+    
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return round(100 - (100 / (1 + rs)), 2)
+
 def get_crypto_data(symbol: str) -> dict:
     formatted_symbol = f"{symbol.upper()}/USDT"
     try:
         ticker = exchange.fetch_ticker(formatted_symbol)
-        price = ticker['last']
-        change_24h = ticker.get('percentage', 0)
+        ohlcv = exchange.fetch_ohlcv(formatted_symbol, timeframe='1h', limit=20)
+        
+        close_prices = [candle[4] for candle in ohlcv]
+        rsi_val = calculate_rsi(close_prices)
+        
         return {
             "symbol": symbol.upper(),
-            "price": price,
+            "price": ticker['last'],
             "high": ticker['high'],
             "low": ticker['low'],
             "volume": ticker['baseVolume'],
-            "change_24h": change_24h
+            "change_24h": ticker.get('percentage', 0),
+            "rsi": rsi_val,
+            "recent_closes": close_prices[-5:]
         }
     except Exception as e:
         logging.error(f"Error fetching data from KuCoin: {e}")
@@ -55,47 +82,51 @@ async def analyze_with_ai(market_data: dict) -> str:
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
     
     prompt = f"""
-    تو یک سیستم هوشمند آنالیز تکنیکال و الگوریتمی کریپتو به نام "آلفا سیگنال" هستی. 
-    بر اساس داده‌های زیر، یک ستاپ کامل معامله‌گری بساز.
-    
-    دقت کن: کل متن نباید از ۹۰۰ کاراکتر بیشتر شود تا در کپشن عکس تلگرام جا بشود.
+    تو یک سیستم فوق‌پیشرفته و هوشمند سیگنال‌دهی تکنیکال و الگوریتمی کریپتو به نام "آلفا آنالیتیکس" هستی.
+    با توجه به داده‌های زیر، یک ستاپ معاملاتی دوطرفه (اگر روند نزولی بود ستاپ Short/Sell و اگر صعودی/رنج بود ستاپ Long/Buy) صادر کن.
 
-    داده‌ها:
-    - ارز: #{market_data['symbol']}USDT
+    داده‌های واقعی بازار:
+    - نماد: #{market_data['symbol']}USDT
     - قیمت فعلی: {market_data['price']}
     - تغییرات ۲۴ ساعته: {market_data['change_24h']}%
+    - شاخص RSI (14): {market_data['rsi']}
+    - آخرین بسته‌شدن کندل‌ها (1h): {market_data['recent_closes']}
     - زمان: {current_time}
 
-    قالب خروجی دقیقاً به این شکل باشد:
+    دستورالعمل مهم روند:
+    - اگر RSI بالا بود یا قیمت در حال ریزش شدید و تغییرات ۲۴h منفی بود، روند را "نزولی 🔴" اعلام کن و ستاپ **فروش / شورت (Short/Sell)** بده.
+    - اگر RSI پایین بود یا روند مثبت بود، روند را "صعودی 🟢" اعلام کن و ستاپ **خرید / لاین (Long/Buy)** بده.
+    - در غیر این صورت روند را "رنج 🟡" اعلام کن.
 
-    💎 **آلفا سیگنال | #{market_data['symbol']}USDT**
+    قالب الزامی خروجی (حداکثر ۹۰۰ کاراکتر):
+
+    ⚡️ **آلفا آنالیتیکس | #{market_data['symbol']}USDT**
     ⏱ زمان: {current_time}
-    📌 روند: (صعودی 🟢 / نزولی 🔴 / رنج 🟡)
+    📌 تحلیل روند: (صعودی 🟢 / نزولی 🔴 / رنج 🟡)
+    📊 شاخص RSI: {market_data['rsi']} | ۲۴h: {market_data['change_24h']}%
 
-    📊 **اطلاعات بازار**
-    • قیمت: `{market_data['price']}` USDT
-    • تغییر ۲۴h: {market_data['change_24h']}%
+    💵 **قیمت مارکت:** `{market_data['price']}` USDT
 
-    ⚡️ **پله‌های ورود (Buy Entry)**
-    • مارکت: `{market_data['price']}`
-    • پله ۲: (محاسبه ۱.۲٪ پایین‌تر)
-    • پله ۳: (محاسبه ۲.۵٪ پایین‌تر)
+    🎯 **ستاپ معاملاتی (بر اساس تشخیص روند)**
+    • موقعیت: (خرید Long 🟢 یا فروش Short 🔴)
+    • پله اول: `{market_data['price']}`
+    • پله دوم: (بر اساس Long یا Short بودن، پله دوم ورود)
+    • پله سوم: (پله سوم ورود)
 
-    🎯 **تارگت‌های سود**
-    ▫️ هدف ۱: (۱.۵٪ بالاتر)
-    ▫️ هدف ۲: (۳.۲٪ بالاتر)
-    ▫️ هدف ۳: (۵.۵٪ بالاتر)
+    🚀 **اهداف سودآوری (Take Profit)**
+    ▫️ هدف ۱: (محاسبه هدف ۱)
+    ▫️ هدف ۲: (محاسبه هدف ۲)
+    ▫️ هدف ۳: (محاسبه هدف ۳)
 
-    🛑 **حد ضرر (Stop Loss):** (۴.۵٪ پایین‌تر)
+    🛑 **حد ضرر (Stop Loss):** (محاسبه استاپ دقیق)
 
-    ⚖️ **مدیریت ریسک**
+    ⚖️ **مدیریت ریسک & اهرم**
     • ریسک به ریوارد (R/R): (محاسبه)
     • اهرم پیشنهادی: Cross 3x - 5x
 
-    🧩 **تحلیل فنی:** (توضیح کوتاه ۱ جمله‌ای در مورد وضعیت عمومی بازار)
+    🧩 **تحلیل اکشن قیمت:** (یک جمله تحلیل بر اساس کندل‌ها و RSI)
     """
     
-    # به‌روزرسانی لیست مدل‌ها به نسخه‌های فعال و رسمی
     models_to_try = [
         'gemini-3.6-flash',
         'gemini-3.1-pro-preview'
@@ -116,13 +147,13 @@ async def analyze_with_ai(market_data: dict) -> str:
             last_err = e
             await asyncio.sleep(0.5)
 
-    return f"❌ خطا در پاسخگویی هوش مصنوعی. لطفاً لحظاتی بعد مجدداً تلاش کنید.\n(جزئیات: {last_err})"
+    return f"❌ خطا در تحلیل هوش مصنوعی. لطفاً مجدداً سعی کنید.\n(جزئیات: {last_err})"
 
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
     await message.answer(
-        "🧠 **ربات پیشرفته تحلیل تکنیکال و آلفا سیگنال**\n\n"
-        "نام ارز مورد نظر (مانند BTC یا SOL) را وارد کنید:",
+        "⚡️ **ترمینال تحلیل پیشرفته و سیگنال‌دهی دوطرفه آلفا**\n\n"
+        "برای دریافت چارت و ستاپ معاملاتی (Long/Short)، نام ارز را فرستاده یا از دکمه‌ها استفاده کنید:",
         reply_markup=main_keyboard,
         parse_mode="Markdown"
     )
@@ -134,7 +165,7 @@ async def process_crypto_name(message: types.Message):
     if symbol.lower().startswith("start"):
         return
 
-    wait_msg = await message.answer(f"🔎 در حال ترسیم چارت و محاسبات سیگنال برای {symbol.upper()}...")
+    wait_msg = await message.answer(f"🔎 در حال آنالیز کندل‌ها، RSI و ساخت ستاپ برای {symbol.upper()}...")
 
     market_data = get_crypto_data(symbol)
     if not market_data:
