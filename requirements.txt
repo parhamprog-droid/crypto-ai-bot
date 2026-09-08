@@ -1,6 +1,6 @@
-aiogram==3.31.0
+aiogram
 google-genai
 ccxt
-pandas
-python-dotenv
 aiohttp
+python-dotenv
+apscheduler
