@@ -95,11 +95,10 @@ async def analyze_with_ai(market_data: dict) -> str:
     🧩 **تحلیل فنی:** (توضیح کوتاه ۱ جمله‌ای در مورد وضعیت عمومی بازار)
     """
     
-    # اولویت‌بندی جدید مدل‌ها جهت جلوگیری از قطعی
+    # به‌روزرسانی لیست مدل‌ها به نسخه‌های فعال و رسمی
     models_to_try = [
         'gemini-3.6-flash',
-        'gemini-2.5-flash',
-        'gemini-2.5-pro'
+        'gemini-3.1-pro-preview'
     ]
 
     last_err = None
