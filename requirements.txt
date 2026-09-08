@@ -3,3 +3,4 @@ google-genai
 ccxt
 pandas
 python-dotenv
+aiohttp
