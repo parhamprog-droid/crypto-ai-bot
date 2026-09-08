@@ -127,27 +127,32 @@ async def analyze_with_ai(market_data: dict) -> str:
     🧩 **تحلیل اکشن قیمت:** (یک جمله تحلیل بر اساس کندل‌ها و RSI)
     """
     
+    # مدل‌های پایدار با سهمیه مناسب
     models_to_try = [
         'gemini-3.6-flash',
-        'gemini-3.1-pro-preview'
+        'gemini-2.5-flash'
     ]
 
     last_err = None
     for model_name in models_to_try:
-        try:
-            logging.info(f"Trying Gemini model: {model_name}")
-            response = ai_client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-            )
-            if response and response.text:
-                return response.text
-        except Exception as e:
-            logging.error(f"Error with model {model_name}: {e}")
-            last_err = e
-            await asyncio.sleep(0.5)
+        for attempt in range(3):
+            try:
+                logging.info(f"Trying Gemini model: {model_name} (Attempt {attempt + 1})")
+                response = ai_client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                )
+                if response and response.text:
+                    return response.text
+            except Exception as e:
+                logging.error(f"Error with model {model_name}: {e}")
+                last_err = e
+                if "429" in str(e) or "RESOURCEEXHAUSTED" in str(e):
+                    await asyncio.sleep(2 * (attempt + 1))
+                else:
+                    break
 
-    return f"❌ خطا در تحلیل هوش مصنوعی. لطفاً مجدداً سعی کنید.\n(جزئیات: {last_err})"
+    return "❌ ترافیک سرورهای هوش مصنوعی بالا است. لطفاً چند ثانیه دیگر دوباره امتحان کنید."
 
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
