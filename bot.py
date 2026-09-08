@@ -6,14 +6,13 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from google import genai
 import ccxt
+from aiohttp import web
 
-# بارگیری کلیدها از فایل .env
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# راه‌اندازی کلاینت‌ها
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
@@ -46,7 +45,7 @@ async def analyze_with_ai(market_data: dict) -> str:
     پایین‌ترین قیمت ۲۴ ساعت: {market_data['low']}
     حجم: {market_data['volume']}
     
-    فرمت خروجی دقیقاً اینطور باشد:
+    فرمت خروجی:
     🎯 **سیگنال:** (خرید / فروش / صبر)
     📥 **نقطه ورود:**
     🏁 **تارگت‌ها:**
@@ -79,13 +78,26 @@ async def signal_handler(message: types.Message):
 
     market_data = get_crypto_data(symbol)
     if not market_data:
-        await wait_msg.edit_text("❌ ارز مورد نظر پیدا نشد یا صرافی پاسخ نداد.")
+        await wait_msg.edit_text("❌ ارز مورد نظر پیدا نشد.")
         return
 
     ai_analysis = await analyze_with_ai(market_data)
     await wait_msg.edit_text(f"📊 **تحلیل هوشمند {symbol.upper()}**\n\n{ai_analysis}", parse_mode="Markdown")
 
+# ساخت یک سرور وب کوچک برای پاسخ به Health Check سرویس Render
+async def handle_ping(request):
+    return web.Response(text="Bot is running smoothly!")
+
 async def main():
+    # فعال‌سازی پورت برای Render
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
     print("Bot is running...")
     await dp.start_polling(bot)
 
