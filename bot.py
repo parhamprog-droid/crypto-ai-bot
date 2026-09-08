@@ -63,8 +63,9 @@ async def analyze_with_ai(market_data: dict) -> str:
     💡 **تحلیل کوتاه:** (حداکثر ۲ جمله)
     """
     try:
+        # تغییر مدل به نسخه جدید پشتیبانی شده
         response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-3.6-flash',
             contents=prompt,
         )
         return response.text
@@ -81,12 +82,10 @@ async def start_handler(message: types.Message):
         parse_mode="Markdown"
     )
 
-# پردازش متون معمولی (ارسال مستقیم اسم ارز بدون دستور)
 @dp.message(F.text)
 async def process_crypto_name(message: types.Message):
     symbol = message.text.strip().replace("/", "")
     
-    # صرف‌نظر از دستورات ناشناخته
     if symbol.startswith("start"):
         return
 
