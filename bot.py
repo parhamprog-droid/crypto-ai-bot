@@ -133,7 +133,7 @@ async def generate_signal(symbol="ETH/USDT", timeframe="1h"):
     🧩 تحلیل اکشن قیمت: [توضیح تحلیلی ۲ جمله‌ای بر اساس RSI و اکشن قیمت]
     """
 
-    models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+    models_to_try = ["llama-3.3-70b-versatile", "llama3-70b-8192"]
     last_error = ""
 
     for model_name in models_to_try:
