@@ -6,7 +6,7 @@ import aiohttp
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-import google.generativeai as genai
+from groq import Groq
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
 
@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO)
 
 # Environment Variables
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("GEMINI_API_KEY")
 ADMIN_ID = os.getenv("ADMIN_ID")
 
 if ADMIN_ID:
@@ -24,12 +24,10 @@ if ADMIN_ID:
     except ValueError:
         logging.error("ADMIN_ID must be a numeric integer!")
 
-# Initialize Bot & Gemini AI
+# Initialize Bot & Groq Client
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
-
-# Configure Gemini
-genai.configure(api_key=GEMINI_API_KEY)
+client = Groq(api_key=GROQ_API_KEY)
 
 # Active users storage
 user_ids = set()
@@ -46,7 +44,6 @@ main_keyboard = ReplyKeyboardMarkup(
 async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=100):
     exchange = ccxt.kucoin()
     try:
-        # Standardize symbol input
         formatted_symbol = symbol.upper().strip()
         if not formatted_symbol.endswith("/USDT") and not formatted_symbol.endswith("USDT"):
             formatted_symbol = f"{formatted_symbol}/USDT"
@@ -77,11 +74,11 @@ async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=100):
         logging.error(f"Error fetching CCXT data: {e}")
         return None, None, None, None
 
-# AI Signal Generation
+# AI Signal Generation using Groq (llama-3.3-70b-versatile)
 async def generate_signal(user_input_symbol: str, timeframe="1h"):
     symbol, price, rsi, change_24h = await get_crypto_data(user_input_symbol, timeframe)
     if not price:
-        return f"⚠️ ارز **{user_input_symbol}** پیدا نشد یا در دریافت اطلاعات صرافی خطایی رخ داد. لطفاً نماد را درست وارد کنید (مثال: BTC یا ETH)."
+        return f"⚠️ ارز **{user_input_symbol}** پیدا نشد. لطفاً نماد را درست وارد کنید (مثال: BTC یا ETH)."
 
     prompt = f"""
     تو یک تحلیل‌گر تکنیکال ارشد کریپتو هستی. برای ارز {symbol} در تایم‌فریم {timeframe} تحلیل بنویس.
@@ -114,11 +111,14 @@ async def generate_signal(user_input_symbol: str, timeframe="1h"):
     """
 
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = await asyncio.to_thread(model.generate_content, prompt)
-        return response.text
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.3-70b-versatile"
+        )
+        return response.choices[0].message.content
     except Exception as e:
-        logging.error(f"Gemini Error: {e}")
+        logging.error(f"Groq Error: {e}")
         return f"⚠️ خطا در سرویس هوش مصنوعی: {e}"
 
 # Telegram Commands & Handlers
