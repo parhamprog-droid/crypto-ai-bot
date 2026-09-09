@@ -135,7 +135,7 @@ async def generate_signal(symbol="ETH/USDT", timeframe="1h"):
 
     try:
         response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-2.0-flash',
             contents=prompt
         )
         return response.text
@@ -254,10 +254,6 @@ async def auto_signal_job():
             except Exception:
                 pass
 
-scheduler = AsyncIOScheduler()
-scheduler.add_job(auto_signal_job, 'interval', hours=1)
-scheduler.start()
-
 # Aiohttp Web Server for Render
 async def handle_web(request):
     return web.Response(text="AlphaEngine Pro is Active!")
@@ -266,6 +262,10 @@ app = web.Application()
 app.router.add_get('/', handle_web)
 
 async def main():
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(auto_signal_job, 'interval', hours=1)
+    scheduler.start()
+
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 8080)))
