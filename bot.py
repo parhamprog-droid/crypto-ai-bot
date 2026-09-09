@@ -6,7 +6,7 @@ import aiohttp
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from groq import AsyncGroq
+from openai import AsyncOpenAI
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
 
@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO)
 
 # Environment Variables
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ADMIN_ID = os.getenv("ADMIN_ID")
 
 if ADMIN_ID:
@@ -24,10 +24,10 @@ if ADMIN_ID:
     except ValueError:
         logging.error("ADMIN_ID must be a numeric integer!")
 
-# Initialize Bot & Groq AI
+# Initialize Bot & OpenAI
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
-groq_client = AsyncGroq(api_key=GROQ_API_KEY)
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 # Active users storage
 user_ids = set()
@@ -97,7 +97,7 @@ async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=100):
         logging.error(f"Error fetching CCXT data: {e}")
         return None, None, None, None
 
-# AI Signal Generation with Groq
+# AI Signal Generation with OpenAI (gpt-4o-mini)
 async def generate_signal(symbol="ETH/USDT", timeframe="1h"):
     price, rsi, change_24h, closes = await get_crypto_data(symbol, timeframe)
     if not price:
@@ -133,26 +133,16 @@ async def generate_signal(symbol="ETH/USDT", timeframe="1h"):
     🧩 تحلیل اکشن قیمت: [توضیح تحلیلی ۲ جمله‌ای بر اساس RSI و اکشن قیمت]
     """
 
-    # لیست جدید مدل‌های فعال، رسمی و پایدار Groq
-    models_to_try = [
-        "llama-3.3-70b-versatile",
-        "gemma2-9b-it"
-    ]
-    last_error = ""
-
-    for model_name in models_to_try:
-        try:
-            chat_completion = await groq_client.chat.completions.create(
-                messages=[{"role": "user", "content": prompt}],
-                model=model_name,
-            )
-            if chat_completion.choices[0].message.content:
-                return chat_completion.choices[0].message.content
-        except Exception as e:
-            logging.error(f"Error on {model_name}: {e}")
-            last_error = str(e)
-
-    return f"⚠️ خطا در سرویس هوش مصنوعی: {last_error}"
+    try:
+        response = await openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logging.error(f"OpenAI Error: {e}")
+        return f"⚠️ خطا در سرویس هوش مصنوعی: {e}"
 
 # Telegram Commands & Handlers
 @dp.message(Command("start"))
