@@ -25,16 +25,20 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "8800494482"))
 
+# اطلاعات پرداخت (این مقادیر را مطابق با خودتان تغییر دهید)
+PAYMENT_CARD = "۶۰۳۷-۹۹۷۹-۰۰۰۰-۰۰۰۰ (به نام ...)"
+PAYMENT_USDT_TRC20 = "TYourUsdtWalletAddressHereXXXXXXXX"
+VIP_PRICE_TOMAN = "۲۵۰,۰۰۰ تومان"
+VIP_PRICE_USDT = "5 USDT"
+
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# دیتابیس حافظه‌ای کاربران
 user_data = {}
 
 def get_user(user_id: int):
     if user_id not in user_data:
-        # اگر آیدی کاربر با ادمین برابر بود، به صورت خودکار VIP فعال شود
         is_admin = (user_id == ADMIN_ID)
         user_data[user_id] = {
             "usage_count": 0,
@@ -61,6 +65,17 @@ def timeframe_keyboard(symbol: str):
             InlineKeyboardButton(text="4h", callback_data=f"tf:{symbol}:4h"),
             InlineKeyboardButton(text="1d", callback_data=f"tf:{symbol}:1d")
         ]
+    ])
+
+def buy_vip_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💎 خرید اشتراک VIP", callback_data="buy_vip")]
+    ])
+
+def admin_approve_keyboard(user_id: int):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ تأیید و فعال‌سازی VIP", callback_data=f"approve_vip:{user_id}")],
+        [InlineKeyboardButton(text="❌ رد درخواست", callback_data=f"reject_vip:{user_id}")]
     ])
 
 async def get_crypto_dataframe(symbol="BTC/USDT", timeframe="1h", limit=80):
@@ -271,7 +286,6 @@ async def generate_signal(symbol: str, timeframe: str):
     chart_bytes = await asyncio.to_thread(generate_custom_chart, df, formatted_symbol, timeframe)
     return response_text, chart_bytes
 
-# 핸들러: دستور start
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     user = get_user(message.from_user.id)
@@ -282,7 +296,6 @@ async def start_cmd(message: types.Message):
         reply_markup=main_keyboard
     )
 
-# دستور ارتقای کاربر توسط ادمین
 @dp.message(Command("setvip"))
 async def set_vip_cmd(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -296,15 +309,14 @@ async def set_vip_cmd(message: types.Message):
     except Exception:
         await message.answer("⚠️ فرمت دستور نادرست است. مثال: `/setvip 123456789`", parse_mode="Markdown")
 
-# اسکنر پامپی (VIP)
 @dp.message(F.text == "🚀 اسکنر ارزهای پامپی")
 async def pump_scanner_handler(message: types.Message):
     user = get_user(message.from_user.id)
     if not user["is_vip"]:
         await message.answer(
             "🔒 **این بخش مخصوص کاربران VIP است.**\n\n"
-            "برای دسترسی به اسکنر آنی ارزهای مستعد پامپ، اشتراک VIP خود را فعال کنید.\n"
-            "📩 جهت تهیه اشتراک با پشتیبانی تماس بگیرید.",
+            "برای دسترسی به اسکنر آنی ارزهای مستعد پامپ، اشتراک VIP خود را فعال کنید.",
+            reply_markup=buy_vip_keyboard(),
             parse_mode="Markdown"
         )
         return
@@ -326,15 +338,14 @@ async def pump_scanner_handler(message: types.Message):
     text += "\n💡 *برای دریافت تحلیل دقیق هر ارز، نام آن را ارسال کنید.*"
     await msg.edit_text(text, parse_mode="Markdown")
 
-# رادار DEX (VIP)
 @dp.message(F.text == "🐳 رادار توکن‌های جدید (DEX)")
 async def dex_radar_handler(message: types.Message):
     user = get_user(message.from_user.id)
     if not user["is_vip"]:
         await message.answer(
             "🔒 **این بخش مخصوص کاربران VIP است.**\n\n"
-            "برای رصد لحظه‌ای توکن‌های پرنقدینگی On-Chain، اشتراک VIP تهیه کنید.\n"
-            "📩 جهت تهیه اشتراک به پشتیبانی پیام دهید.",
+            "برای رصد لحظه‌ای توکن‌های پرنقدینگی On-Chain، اشتراک VIP تهیه کنید.",
+            reply_markup=buy_vip_keyboard(),
             parse_mode="Markdown"
         )
         return
@@ -357,7 +368,6 @@ async def dex_radar_handler(message: types.Message):
     text += "\n⚠️ *توجه: معامله توکن‌های DEX ریسک بالا دارد. حتماً حد ضرر را رعایت کنید.*"
     await msg.edit_text(text, parse_mode="Markdown")
 
-# شاخص ترس و طمع
 @dp.message(F.text == "📊 شاخص ترس و طمع")
 async def fear_and_greed(message: types.Message):
     async with aiohttp.ClientSession() as session:
@@ -369,7 +379,6 @@ async def fear_and_greed(message: types.Message):
                     f"📊 **شاخص ترس و طمع:**\n\n🎯 عدد: **{item['value']}/100**\n📌 وضعیت: **{item['value_classification']}**"
                 )
 
-# ماشین‌حساب محاسبه ریسک
 @dp.message(F.text == "🧮 محاسبه ریسک")
 async def start_risk_calc(message: types.Message):
     user = get_user(message.from_user.id)
@@ -381,7 +390,6 @@ async def start_risk_calc(message: types.Message):
         "*(مثال: 1000)*"
     )
 
-# حساب کاربری
 @dp.message(F.text == "👤 حساب کاربری")
 async def user_profile(message: types.Message):
     user = get_user(message.from_user.id)
@@ -394,12 +402,99 @@ async def user_profile(message: types.Message):
         f"👑 وضعیت اشتراک: {status_text}\n"
         f"📊 تحلیل‌های امروز: `{limit_text}`\n\n"
     )
+    
     if not user["is_vip"]:
         profile_msg += "💡 *با ارتقا به VIP، به اسکنر پامپی، رادار DEX و تحلیل نامحدود دسترسی پیدا کنید.*"
-    
-    await message.answer(profile_msg, parse_mode="Markdown")
+        await message.answer(profile_msg, reply_markup=buy_vip_keyboard(), parse_mode="Markdown")
+    else:
+        await message.answer(profile_msg, parse_mode="Markdown")
 
-# کلیک روی تایم‌فریم‌ها
+# کلیک روی خرید VIP
+@dp.callback_query(F.data == "buy_vip")
+async def handle_buy_vip_click(callback: types.CallbackQuery):
+    await callback.answer()
+    user = get_user(callback.from_user.id)
+    user["state"] = "awaiting_payment_receipt"
+    
+    pay_msg = (
+        "💎 **راهنمای خرید اشتراک VIP:**\n\n"
+        f"💰 **هزینه اشتراک:** `{VIP_PRICE_TOMAN}` یا `{VIP_PRICE_USDT}`\n\n"
+        f"💳 **شماره کارت:**\n`{PAYMENT_CARD}`\n\n"
+        f"🌐 **آدرس ولت تتر (TRC20):**\n`{PAYMENT_USDT_TRC20}`\n\n"
+        "📸 **مراحل فعال‌سازی:**\n"
+        "۱. مبلغ را واریز کنید.\n"
+        "۲. **عکس فیش واریزی یا عکس تراکنش** را همین‌جا در ربات ارسال کنید.\n"
+        "۳. پس از بررسی ادمین، حساب شما فوراً VIP خواهد شد."
+    )
+    await callback.message.answer(pay_msg, parse_mode="Markdown")
+
+# دریافت فیش واریزی از کاربر (تصویر)
+@dp.message(F.photo)
+async def handle_receipt_photo(message: types.Message):
+    user = get_user(message.from_user.id)
+    if user.get("state") == "awaiting_payment_receipt":
+        user["state"] = None
+        
+        # ارسال پیام به کاربر
+        await message.answer("✅ **فیش واریزی شما دریافت شد.**\nپس از بررسی ادمین، اشتراک شما فعال می‌گردد.")
+        
+        # forwarding فیش به ادمین به همراه دکمه‌های تأیید/رد
+        caption = (
+            f"📥 **درخواست جدید خرید VIP**\n\n"
+            f"👤 کاربر: {message.from_user.full_name}\n"
+            f"🆔 آیدی عددی: `{message.from_user.id}`\n"
+            f"🔗 یوزرنیم: @{message.from_user.username or 'ندارد'}"
+        )
+        photo_id = message.photo[-1].file_id
+        await bot.send_photo(
+            chat_id=ADMIN_ID,
+            photo=photo_id,
+            caption=caption,
+            reply_markup=admin_approve_keyboard(message.from_user.id),
+            parse_mode="Markdown"
+        )
+
+# کلیک ادمین روی دکمه تأیید یا رد
+@dp.callback_query(F.data.startswith("approve_vip:"))
+async def approve_vip_handler(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    await callback.answer()
+    
+    target_id = int(callback.data.split(":")[1])
+    u = get_user(target_id)
+    u["is_vip"] = True
+    
+    # تغییر پیام ادمین
+    await callback.message.edit_caption(caption=f"{callback.message.caption}\n\n✅ **تأیید شد و VIP فعال گردید.**")
+    
+    # اطلاع‌رسانی به کاربر
+    try:
+        await bot.send_message(
+            chat_id=target_id,
+            text="🎉 **تبریک! اشتراک VIP شما با موفقیت فعال شد.**\nهم‌اکنون می‌توانید از تمام امکانات ربات استفاده کنید."
+        )
+    except Exception as e:
+        logging.error(f"Failed to send msg to user: {e}")
+
+@dp.callback_query(F.data.startswith("reject_vip:"))
+async def reject_vip_handler(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    await callback.answer()
+    
+    target_id = int(callback.data.split(":")[1])
+    
+    await callback.message.edit_caption(caption=f"{callback.message.caption}\n\n❌ **درخواست رد شد.**")
+    
+    try:
+        await bot.send_message(
+            chat_id=target_id,
+            text="❌ **درخواست پرداخت شما تأیید نشد.**\nلطفاً در صورت نیاز با پشتیبانی تماس بگیرید."
+        )
+    except Exception as e:
+        logging.error(f"Failed to send msg to user: {e}")
+
 @dp.callback_query(F.data.startswith("tf:"))
 async def handle_timeframe_click(callback: types.CallbackQuery):
     await callback.answer()
@@ -408,7 +503,8 @@ async def handle_timeframe_click(callback: types.CallbackQuery):
     if not user["is_vip"] and user["usage_count"] >= 3:
         await callback.message.edit_text(
             "⚠️ **سقف استفاده روزانه شما (۳ بار) به پایان رسیده است.**\n\n"
-            "برای دریافت تحلیل‌های نامحدود، اشتراک **VIP** تهیه کنید."
+            "برای دریافت تحلیل‌های نامحدود، اشتراک **VIP** تهیه کنید.",
+            reply_markup=buy_vip_keyboard()
         )
         return
 
@@ -426,14 +522,12 @@ async def handle_timeframe_click(callback: types.CallbackQuery):
     else:
         await callback.message.answer(signal_text)
 
-# ورودی متن عام (نام ارز یا ورودی‌های محاسبه ریسک)
 @dp.message(F.text)
 async def handle_text_input(message: types.Message):
     text = message.text.strip()
     user = get_user(message.from_user.id)
     state = user.get("state")
 
-    # مراحل ماشین‌حساب مدیریت ریسک
     if state == "awaiting_capital":
         try:
             capital = float(text)
@@ -472,7 +566,7 @@ async def handle_text_input(message: types.Message):
             risk_pct = data["risk_pct"]
             entry = data["entry"]
 
-            user["state"] = None  # ریست کردن استیت
+            user["state"] = None
 
             risk_amount = capital * (risk_pct / 100)
             sl_distance_pct = abs(entry - sl) / entry
@@ -499,7 +593,6 @@ async def handle_text_input(message: types.Message):
             await message.answer("⚠️ لطفاً عدد معتبر وارد کنید.")
         return
 
-    # دریافت نام نماد برای تحلیل
     symbol_text = text.upper()
     if symbol_text.startswith("/") or symbol_text in ["🚀 اسکنر ارزهای پامپی", "🐳 رادار توکن‌های جدید (DEX)", "📊 شاخص ترس و طمع", "🧮 محاسبه ریسک", "👤 حساب کاربری"]:
         return
