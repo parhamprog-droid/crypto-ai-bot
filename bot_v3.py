@@ -106,70 +106,97 @@ async def scan_pump_candidates():
         logging.error(f"Scanner Error: {e}")
         return []
 
-# تابع دریافت توکن‌های ترند DEX با استخراج کاملاً اصلاح‌شده نام شبکه
+# تابع بهینه‌شده و ۱۰۰٪ مقاوم در برابر Timeout و Error
 async def fetch_dex_tokens():
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    }
+    chain_map = {
+        "solana": "SOLANA",
+        "ethereum": "ETHEREUM",
+        "bsc": "BINANCE SMART CHAIN",
+        "base": "BASE",
+        "arbitrum": "ARBITRUM",
+        "polygon": "POLYGON",
+        "avalanche": "AVALANCHE",
+        "sui": "SUI",
+        "ton": "TON"
+    }
+    
     async with aiohttp.ClientSession(headers=headers) as session:
         try:
-            async with session.get("https://api.dexscreener.com/token-boosts/top/v1", timeout=10) as resp:
-                if resp.status == 200:
-                    boosts_data = await resp.json()
-                    filtered = []
-                    seen_tokens = set()
+            # step 1: دریافت لیست ترندها
+            async with session.get("https://api.dexscreener.com/token-boosts/top/v1", timeout=8) as resp:
+                if resp.status != 200:
+                    return []
+                boosts_data = await resp.json()
+            
+            addresses = []
+            for item in boosts_data:
+                addr = item.get("tokenAddress")
+                if addr and addr not in addresses:
+                    addresses.append(addr)
+                if len(addresses) >= 15:
+                    break
                     
-                    for item in boosts_data:
-                        token_address = item.get("tokenAddress")
-                        if not token_address or token_address in seen_tokens:
-                            continue
-                            
-                        pair_url = f"https://api.dexscreener.com/latest/dex/tokens/{token_address}"
-                        async with session.get(pair_url, timeout=5) as p_resp:
-                            if p_resp.status == 200:
-                                p_data = await p_resp.json()
-                                pairs = p_data.get("pairs", [])
-                                if pairs:
-                                    # انتخاب استخر با بالاترین نقدینگی
-                                    best_pair = max(pairs, key=lambda x: float(x.get("liquidity", {}).get("usd", 0) or 0))
-                                    
-                                    token_symbol = best_pair.get("baseToken", {}).get("symbol", "N/A")
-                                    token_name = best_pair.get("baseToken", {}).get("name", "N/A")
-                                    price = best_pair.get("priceUsd", "0")
-                                    liquidity = float(best_pair.get("liquidity", {}).get("usd", 0) or 0)
-                                    
-                                    # استخراج دقیق chainId
-                                    raw_chain = str(best_pair.get("chainId", "N/A")).lower()
-                                    
-                                    # نگاشت نام شبکه‌ها به عبارت استاندارد
-                                    chain_map = {
-                                        "solana": "SOLANA",
-                                        "ethereum": "ETHEREUM",
-                                        "bsc": "BINANCE SMART CHAIN",
-                                        "base": "BASE",
-                                        "arbitrum": "ARBITRUM",
-                                        "polygon": "POLYGON",
-                                        "avalanche": "AVALANCHE",
-                                        "sui": "SUI",
-                                        "ton": "TON"
-                                    }
-                                    chain_name = chain_map.get(raw_chain, raw_chain.upper())
-                                    
-                                    if liquidity > 10000 and token_symbol not in seen_tokens:
-                                        seen_tokens.add(token_address)
-                                        seen_tokens.add(token_symbol)
-                                        filtered.append({
-                                            "symbol": token_symbol,
-                                            "name": token_name,
-                                            "price": price,
-                                            "liquidity": liquidity,
-                                            "chain": chain_name
-                                        })
-                        if len(filtered) >= 5:
-                            break
-                    return filtered
+            if not addresses:
+                return []
+
+            # step 2: استعلام دسته‌جمعی (یک درخواست به جای چندین درخواست)
+            addrs_str = ",".join(addresses)
+            pair_url = f"https://api.dexscreener.com/latest/dex/tokens/{addrs_str}"
+            
+            async with session.get(pair_url, timeout=8) as p_resp:
+                if p_resp.status != 200:
+                    return []
+                p_data = await p_resp.json()
+                pairs = p_data.get("pairs", [])
+                
+                if not pairs:
+                    return []
+
+                # گروه بندی بر اساس توکن پایه
+                token_groups = {}
+                for pair in pairs:
+                    base_addr = pair.get("baseToken", {}).get("address")
+                    if base_addr:
+                        if base_addr not in token_groups:
+                            token_groups[base_addr] = []
+                        token_groups[base_addr].append(pair)
+
+                filtered = []
+                seen_symbols = set()
+
+                for addr, pair_list in token_groups.items():
+                    # انتخاب استخر با بالاترین نقدینگی
+                    best_pair = max(pair_list, key=lambda x: float(x.get("liquidity", {}).get("usd", 0) or 0))
+                    
+                    token_symbol = best_pair.get("baseToken", {}).get("symbol", "N/A")
+                    token_name = best_pair.get("baseToken", {}).get("name", "N/A")
+                    price = best_pair.get("priceUsd", "0")
+                    liquidity = float(best_pair.get("liquidity", {}).get("usd", 0) or 0)
+                    
+                    raw_chain = str(best_pair.get("chainId", "N/A")).lower()
+                    chain_name = chain_map.get(raw_chain, raw_chain.upper())
+
+                    if liquidity > 5000 and token_symbol not in seen_symbols:
+                        seen_symbols.add(token_symbol)
+                        filtered.append({
+                            "symbol": token_symbol,
+                            "name": token_name,
+                            "price": price,
+                            "liquidity": liquidity,
+                            "chain": chain_name
+                        })
+                    
+                    if len(filtered) >= 5:
+                        break
+
+                return filtered
+
         except Exception as e:
             logging.error(f"DEX Fetch Error: {e}")
             return []
-    return []
 
 def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
     clean_symbol = symbol.replace("/", "")
