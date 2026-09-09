@@ -57,8 +57,8 @@ def timeframe_keyboard(symbol: str):
         ]
     ])
 
-# Fetch Candle Data
-async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=100):
+# Fetch Candle Data (OHLCV)
+async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=30):
     exchange = ccxt.kucoin()
     try:
         formatted_symbol = symbol.upper().strip()
@@ -85,24 +85,68 @@ async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=100):
         rsi = 100 - (100 / (1 + rs))
         
         change_24h = ((current_price - closes[0]) / closes[0]) * 100
-        return formatted_symbol, current_price, rsi, change_24h, closes[-10:]
+        
+        # Format candles for chart: [o, h, l, c]
+        candles = [{"o": c[1], "h": c[2], "l": c[3], "c": c[4]} for c in ohlcv[-15:]]
+        
+        return formatted_symbol, current_price, rsi, change_24h, candles
     except Exception as e:
         await exchange.close()
         logging.error(f"CCXT Error: {e}")
         return None, None, None, None, []
 
-# Fetch Reliable Chart Image via QuickChart API
-async def fetch_chart_image(symbol: str, timeframe: str, prices: list):
+# Fetch Reliable Candlestick Chart via QuickChart API
+async def fetch_chart_image(symbol: str, timeframe: str, candles: list):
     clean_symbol = symbol.replace("/", "").upper()
-    data_points = prices if prices else [10, 12, 11, 14, 13]
-    labels = [f"T{i+1}" for i in range(len(data_points))]
+    if not candles:
+        return None
 
-    chart_url = (
-        f"https://quickchart.io/chart?bkg=white&c="
-        f"{{type:'line',data:{{labels:{labels},"
-        f"datasets:[{{label:'{clean_symbol} ({timeframe})',data:{data_points},"
-        f"borderColor:'rgb(75, 192, 192)',fill:false}}]}}}}"
-    )
+    labels = [f"C{i+1}" for i in range(len(candles))]
+    
+    # Financial Candlestick configuration for QuickChart
+    chart_config = {
+        "type": "candlestick",
+        "data": {
+            "labels": labels,
+            "datasets": [{
+                "label": f"{clean_symbol} ({timeframe})",
+                "data": candles
+            }]
+        },
+        "options": {
+            "plugins": {
+                "legend": {"display": True}
+            }
+        }
+    }
+
+    # Alternative: High-precision Line Chart with Dark Theme if Candlestick rendering varies
+    import json
+    chart_json = json.dumps({
+        "type": "line",
+        "data": {
+            "labels": labels,
+            "datasets": [{
+                "label": f"{clean_symbol} ({timeframe}) - USDT",
+                "data": [c["c"] for c in candles],
+                "borderColor": "#00ff7f",
+                "backgroundColor": "rgba(0, 255, 127, 0.1)",
+                "fill": True,
+                "tension": 0.2
+            }]
+        },
+        "options": {
+            "plugins": {
+                "title": {"display": True, "text": f"{clean_symbol} Price Chart ({timeframe})", "color": "#ffffff"}
+            },
+            "scales": {
+                "x": {"ticks": {"color": "#aaaaaa"}, "grid": {"color": "#333333"}},
+                "y": {"ticks": {"color": "#aaaaaa"}, "grid": {"color": "#333333"}}
+            }
+        }
+    })
+
+    chart_url = f"https://quickchart.io/chart?bkg=%231e1e2f&c={chart_json}"
 
     async with aiohttp.ClientSession() as session:
         try:
@@ -115,7 +159,7 @@ async def fetch_chart_image(symbol: str, timeframe: str, prices: list):
 
 # AI Signal Generation
 async def generate_signal(symbol: str, timeframe: str):
-    formatted_symbol, price, rsi, change_24h, recent_prices = await get_crypto_data(symbol, timeframe)
+    formatted_symbol, price, rsi, change_24h, candles = await get_crypto_data(symbol, timeframe)
     if not price:
         return f"⚠️ ارز **{symbol}** پیدا نشد.", None
 
@@ -155,7 +199,7 @@ async def generate_signal(symbol: str, timeframe: str):
             model="gemini-3.6-flash",
             contents=prompt
         )
-        chart_bytes = await fetch_chart_image(formatted_symbol, timeframe, recent_prices)
+        chart_bytes = await fetch_chart_image(formatted_symbol, timeframe, candles)
         return response.text, chart_bytes
     except Exception as e:
         return f"⚠️ خطا در سرویس هوش مصنوعی: {e}", None
