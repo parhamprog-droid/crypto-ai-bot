@@ -106,25 +106,45 @@ async def scan_pump_candidates():
         logging.error(f"Scanner Error: {e}")
         return []
 
+# اصلاح تابع DEX جهت دریافت توکن‌های ترند و واقعی بدون تکرار
 async def fetch_dex_tokens():
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get("https://api.dexscreener.com/latest/dex/search?q=solana") as resp:
+            async with session.get("https://api.dexscreener.com/token-boosts/top/v1") as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    pairs = data.get("pairs", [])
                     filtered = []
-                    for pair in pairs[:10]:
-                        liquidity = pair.get("liquidity", {}).get("usd", 0)
-                        if liquidity > 50000:  # حداقل نقدینگی ۵۰ هزار دلار جهت امنیت بیشتر
-                            filtered.append({
-                                "symbol": pair.get("baseToken", {}).get("symbol", "N/A"),
-                                "name": pair.get("baseToken", {}).get("name", "N/A"),
-                                "price": pair.get("priceUsd", "0"),
-                                "liquidity": liquidity,
-                                "chain": pair.get("chainId", "N/A")
-                            })
-                    return filtered[:5]
+                    seen_symbols = set()
+                    
+                    for item in data:
+                        symbol = item.get("tokenAddress", "")[:6]
+                        if "tokenAddress" in item:
+                            chain = item.get("chainId", "N/A")
+                            # دریافت اطلاعات جزئی جفت‌ارز
+                            pair_url = f"https://api.dexscreener.com/latest/dex/tokens/{item['tokenAddress']}"
+                            async with session.get(pair_url) as p_resp:
+                                if p_resp.status == 200:
+                                    p_data = await p_resp.json()
+                                    pairs = p_data.get("pairs", [])
+                                    if pairs:
+                                        best_pair = pairs[0]
+                                        token_symbol = best_pair.get("baseToken", {}).get("symbol", "N/A")
+                                        token_name = best_pair.get("baseToken", {}).get("name", "N/A")
+                                        price = best_pair.get("priceUsd", "0")
+                                        liquidity = best_pair.get("liquidity", {}).get("usd", 0)
+                                        
+                                        if token_symbol not in seen_symbols and liquidity > 20000:
+                                            seen_symbols.add(token_symbol)
+                                            filtered.append({
+                                                "symbol": token_symbol,
+                                                "name": token_name,
+                                                "price": price,
+                                                "liquidity": liquidity,
+                                                "chain": chain
+                                            })
+                        if len(filtered) >= 5:
+                            break
+                    return filtered
         except Exception as e:
             logging.error(f"DEX Fetch Error: {e}")
             return []
@@ -278,7 +298,7 @@ async def dex_radar_handler(message: types.Message):
         await msg.edit_text("⚠️ اطلاعات توکن‌های غیرمتمرکز دریافت نشد.")
         return
     
-    text = "🐳 **توکن‌های پرنقدینگی On-Chain (شناسایی‌شده):**\n\n"
+    text = "🐳 **توکن‌های ترند و پرنقدینگی On-Chain (شناسایی‌شده):**\n\n"
     for t in tokens:
         text += f"🪙 **{t['name']} ({t['symbol']})**\n"
         text += f"🌐 شبکه: `{t['chain'].upper()}`\n"
