@@ -23,7 +23,7 @@ logging.basicConfig(level=logging.INFO)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # آیدی عددی ادمین در متغیرهای محیطی
+ADMIN_ID = int(os.getenv("ADMIN_ID", "8800494482"))
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
@@ -34,9 +34,11 @@ user_data = {}
 
 def get_user(user_id: int):
     if user_id not in user_data:
+        # اگر آیدی کاربر با ادمین برابر بود، به صورت خودکار VIP فعال شود
+        is_admin = (user_id == ADMIN_ID)
         user_data[user_id] = {
             "usage_count": 0,
-            "is_vip": False,
+            "is_vip": is_admin,
             "state": None,
             "risk_calc_data": {}
         }
@@ -280,21 +282,21 @@ async def start_cmd(message: types.Message):
         reply_markup=main_keyboard
     )
 
-# ادمین: ارتقای کاربر به VIP
+# دستور ارتقای کاربر توسط ادمین
 @dp.message(Command("setvip"))
 async def set_vip_cmd(message: types.Message):
-    if message.from_user.id != ADMIN_ID and ADMIN_ID != 0:
+    if message.from_user.id != ADMIN_ID:
         return
     try:
         args = message.text.split()
         target_id = int(args[1])
         u = get_user(target_id)
         u["is_vip"] = True
-        await message.answer(f"✅ کاربر {target_id} با موفقیت به **VIP** ارتقا یافت.")
-    except Exception as e:
-        await message.answer("⚠️ فرمت دستور نادرست است. مثال: `/setvip 123456789`")
+        await message.answer(f"✅ کاربر `{target_id}` با موفقیت به **VIP** ارتقا یافت.", parse_mode="Markdown")
+    except Exception:
+        await message.answer("⚠️ فرمت دستور نادرست است. مثال: `/setvip 123456789`", parse_mode="Markdown")
 
-# اسکنر پامپی (مخصوص VIP)
+# اسکنر پامپی (VIP)
 @dp.message(F.text == "🚀 اسکنر ارزهای پامپی")
 async def pump_scanner_handler(message: types.Message):
     user = get_user(message.from_user.id)
@@ -324,7 +326,7 @@ async def pump_scanner_handler(message: types.Message):
     text += "\n💡 *برای دریافت تحلیل دقیق هر ارز، نام آن را ارسال کنید.*"
     await msg.edit_text(text, parse_mode="Markdown")
 
-# رادار DEX (مخصوص VIP)
+# رادار DEX (VIP)
 @dp.message(F.text == "🐳 رادار توکن‌های جدید (DEX)")
 async def dex_radar_handler(message: types.Message):
     user = get_user(message.from_user.id)
@@ -383,7 +385,7 @@ async def start_risk_calc(message: types.Message):
 @dp.message(F.text == "👤 حساب کاربری")
 async def user_profile(message: types.Message):
     user = get_user(message.from_user.id)
-    status_text = "💎 **VIP (نامحدود)**" if user["is_vip"] else "👤 **رایگان**"
+    status_text = "💎 **VIP (نامحدود / مدیر)**" if user["is_vip"] else "👤 **رایگان**"
     limit_text = "نامحدود" if user["is_vip"] else f"{user['usage_count']} / 3 استفاده امروز"
     
     profile_msg = (
