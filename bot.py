@@ -97,7 +97,7 @@ async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=100):
         logging.error(f"Error fetching CCXT data: {e}")
         return None, None, None, None
 
-# AI Signal Generation with Groq (Llama-3.3-70b)
+# AI Signal Generation with Groq (Fallback Mechanism)
 async def generate_signal(symbol="ETH/USDT", timeframe="1h"):
     price, rsi, change_24h, closes = await get_crypto_data(symbol, timeframe)
     if not price:
@@ -133,20 +133,22 @@ async def generate_signal(symbol="ETH/USDT", timeframe="1h"):
     🧩 تحلیل اکشن قیمت: [توضیح تحلیلی ۲ جمله‌ای بر اساس RSI و اکشن قیمت]
     """
 
-    try:
-        chat_completion = await groq_client.chat.completions.create(
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-            model="llama-3.3-70b-versatile",
-        )
-        return chat_completion.choices[0].message.content
-    except Exception as e:
-        logging.error(f"Groq API Error: {e}")
-        return "⚠️ خطا در ارتباط با هوش مصنوعی. لطفاً دوباره تلاش کنید."
+    models_to_try = ["llama-3.3-70b-versatile", "llama3-8b-8192", "mixtral-8x7b-32768"]
+    last_error = ""
+
+    for model_name in models_to_try:
+        try:
+            chat_completion = await groq_client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model=model_name,
+            )
+            if chat_completion.choices[0].message.content:
+                return chat_completion.choices[0].message.content
+        except Exception as e:
+            logging.error(f"Error on {model_name}: {e}")
+            last_error = str(e)
+
+    return f"⚠️ خطا در سرویس هوش مصنوعی: {last_error}"
 
 # Telegram Commands & Handlers
 @dp.message(Command("start"))
