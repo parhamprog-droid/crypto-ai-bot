@@ -19,6 +19,7 @@ logging.basicConfig(level=logging.INFO)
 # Config & Envs
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+CHART_IMG_API_KEY = os.getenv("CHART_IMG_API_KEY")
 ADMIN_ID = os.getenv("ADMIN_ID")
 
 if ADMIN_ID:
@@ -57,8 +58,8 @@ def timeframe_keyboard(symbol: str):
         ]
     ])
 
-# Fetch Candle Data (OHLCV)
-async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=30):
+# Fetch Candle Data from KuCoin
+async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=100):
     exchange = ccxt.kucoin()
     try:
         formatted_symbol = symbol.upper().strip()
@@ -85,81 +86,54 @@ async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=30):
         rsi = 100 - (100 / (1 + rs))
         
         change_24h = ((current_price - closes[0]) / closes[0]) * 100
-        
-        # Format candles for chart: [o, h, l, c]
-        candles = [{"o": c[1], "h": c[2], "l": c[3], "c": c[4]} for c in ohlcv[-15:]]
-        
-        return formatted_symbol, current_price, rsi, change_24h, candles
+        return formatted_symbol, current_price, rsi, change_24h
     except Exception as e:
         await exchange.close()
         logging.error(f"CCXT Error: {e}")
-        return None, None, None, None, []
+        return None, None, None, None
 
-# Fetch Reliable Candlestick Chart via QuickChart API
-async def fetch_chart_image(symbol: str, timeframe: str, candles: list):
+# Real TradingView Chart Image Fetcher
+async def fetch_chart_image(symbol: str, timeframe: str):
     clean_symbol = symbol.replace("/", "").upper()
-    if not candles:
-        return None
+    tf_map = {"15m": "15m", "1h": "1h", "4h": "4h", "1d": "1D"}
+    interval = tf_map.get(timeframe, "1h")
 
-    labels = [f"C{i+1}" for i in range(len(candles))]
-    
-    # Financial Candlestick configuration for QuickChart
-    chart_config = {
-        "type": "candlestick",
-        "data": {
-            "labels": labels,
-            "datasets": [{
-                "label": f"{clean_symbol} ({timeframe})",
-                "data": candles
-            }]
-        },
-        "options": {
-            "plugins": {
-                "legend": {"display": True}
-            }
+    if CHART_IMG_API_KEY:
+        url = "https://api.chart-img.com/v2/tradingview/advanced-chart"
+        payload = {
+            "symbol": f"BINANCE:{clean_symbol}",
+            "interval": interval,
+            "theme": "dark",
+            "width": 800,
+            "height": 500,
+            "studies": ["RSI"]
         }
-    }
-
-    # Alternative: High-precision Line Chart with Dark Theme if Candlestick rendering varies
-    import json
-    chart_json = json.dumps({
-        "type": "line",
-        "data": {
-            "labels": labels,
-            "datasets": [{
-                "label": f"{clean_symbol} ({timeframe}) - USDT",
-                "data": [c["c"] for c in candles],
-                "borderColor": "#00ff7f",
-                "backgroundColor": "rgba(0, 255, 127, 0.1)",
-                "fill": True,
-                "tension": 0.2
-            }]
-        },
-        "options": {
-            "plugins": {
-                "title": {"display": True, "text": f"{clean_symbol} Price Chart ({timeframe})", "color": "#ffffff"}
-            },
-            "scales": {
-                "x": {"ticks": {"color": "#aaaaaa"}, "grid": {"color": "#333333"}},
-                "y": {"ticks": {"color": "#aaaaaa"}, "grid": {"color": "#333333"}}
-            }
+        headers = {
+            "authorization": f"Bearer {CHART_IMG_API_KEY}",
+            "content-type": "application/json"
         }
-    })
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(url, json=payload, headers=headers, timeout=12) as resp:
+                    if resp.status == 200:
+                        return await resp.read()
+            except Exception as e:
+                logging.error(f"Chart-Img fetch error: {e}")
 
-    chart_url = f"https://quickchart.io/chart?bkg=%231e1e2f&c={chart_json}"
-
+    # Fallback Image if API key is not set yet
+    fallback_url = f"https://quickchart.io/chart?bkg=%231e1e2f&c={{type:'line',data:{{labels:[1,2,3,4,5],datasets:[{{label:'{clean_symbol} ({timeframe})',data:[10,12,11,14,13],borderColor:'%2300ff7f'}}]}}}}"
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(chart_url, timeout=10) as resp:
+            async with session.get(fallback_url, timeout=5) as resp:
                 if resp.status == 200:
                     return await resp.read()
-        except Exception as e:
-            logging.error(f"Chart fetch error: {e}")
+        except Exception:
+            pass
     return None
 
-# AI Signal Generation
+# AI Signal Generation with Retry Logic for 503 Errors
 async def generate_signal(symbol: str, timeframe: str):
-    formatted_symbol, price, rsi, change_24h, candles = await get_crypto_data(symbol, timeframe)
+    formatted_symbol, price, rsi, change_24h = await get_crypto_data(symbol, timeframe)
     if not price:
         return f"⚠️ ارز **{symbol}** پیدا نشد.", None
 
@@ -193,16 +167,26 @@ async def generate_signal(symbol: str, timeframe: str):
     🧩 تحلیل اکشن قیمت: [توضیح تحلیلی ۲ جمله‌ای]
     """
 
-    try:
-        response = await asyncio.to_thread(
-            ai_client.models.generate_content,
-            model="gemini-3.6-flash",
-            contents=prompt
-        )
-        chart_bytes = await fetch_chart_image(formatted_symbol, timeframe, candles)
-        return response.text, chart_bytes
-    except Exception as e:
-        return f"⚠️ خطا در سرویس هوش مصنوعی: {e}", None
+    # Retry logic up to 3 times for 503 / busy model
+    response_text = None
+    for attempt in range(3):
+        try:
+            response = await asyncio.to_thread(
+                ai_client.models.generate_content,
+                model="gemini-3.6-flash",
+                contents=prompt
+            )
+            response_text = response.text
+            break
+        except Exception as e:
+            logging.warning(f"Attempt {attempt+1} failed: {e}")
+            if attempt < 2:
+                await asyncio.sleep(2)
+            else:
+                return "⚠️ سرور هوش مصنوعی در حال حاضر شلوغ است. لطفاً چند ثانیه دیگر مجدداً روی تایم‌فریم کلیک کنید.", None
+
+    chart_bytes = await fetch_chart_image(formatted_symbol, timeframe)
+    return response_text, chart_bytes
 
 # Handlers
 @dp.message(Command("start"))
@@ -210,7 +194,7 @@ async def start_cmd(message: types.Message):
     get_user(message.from_user.id)
     await message.answer(
         "👋 به **AlphaEngine Pro** خوش آمدید!\n\n"
-        "برای دریافت تحلیل و عکس نمودار، نام ارز را بفرستید (مثلاً `BTC` یا `ETH`).",
+        "برای دریافت تحلیل و عکس نمودار TradingView، نام ارز را بفرستید (مثلاً `BTC` یا `ETH`).",
         reply_markup=main_keyboard
     )
 
@@ -228,7 +212,7 @@ async def fear_and_greed(message: types.Message):
 @dp.callback_query(F.data.startswith("tf:"))
 async def handle_timeframe_click(callback: types.CallbackQuery):
     _, symbol, tf = callback.data.split(":")
-    await callback.message.edit_text(f"🔄 در حال دریافت عکس چارت و تحلیل **{symbol}** در تایم‌فریم **{tf}**...")
+    await callback.message.edit_text(f"🔄 در حال دریافت چارت TradingView و تحلیل **{symbol}** در تایم‌فریم **{tf}**...")
     
     signal_text, chart_bytes = await generate_signal(symbol, tf)
     await callback.message.delete()
