@@ -106,7 +106,7 @@ async def scan_pump_candidates():
         logging.error(f"Scanner Error: {e}")
         return []
 
-# تابع به‌روزرسانی شده دریافت توکن‌های ترند DEX با استخراج کاملاً دقیق شبکه
+# تابع دریافت توکن‌های ترند DEX با استخراج کاملاً اصلاح‌شده نام شبکه
 async def fetch_dex_tokens():
     headers = {'User-Agent': 'Mozilla/5.0'}
     async with aiohttp.ClientSession(headers=headers) as session:
@@ -128,14 +128,30 @@ async def fetch_dex_tokens():
                                 p_data = await p_resp.json()
                                 pairs = p_data.get("pairs", [])
                                 if pairs:
-                                    # انتخاب بهترین استخر بر اساس بیشترین نقدینگی
+                                    # انتخاب استخر با بالاترین نقدینگی
                                     best_pair = max(pairs, key=lambda x: float(x.get("liquidity", {}).get("usd", 0) or 0))
                                     
                                     token_symbol = best_pair.get("baseToken", {}).get("symbol", "N/A")
                                     token_name = best_pair.get("baseToken", {}).get("name", "N/A")
                                     price = best_pair.get("priceUsd", "0")
                                     liquidity = float(best_pair.get("liquidity", {}).get("usd", 0) or 0)
-                                    chain_id = best_pair.get("chainId", "N/A")
+                                    
+                                    # استخراج دقیق chainId
+                                    raw_chain = str(best_pair.get("chainId", "N/A")).lower()
+                                    
+                                    # نگاشت نام شبکه‌ها به عبارت استاندارد
+                                    chain_map = {
+                                        "solana": "SOLANA",
+                                        "ethereum": "ETHEREUM",
+                                        "bsc": "BINANCE SMART CHAIN",
+                                        "base": "BASE",
+                                        "arbitrum": "ARBITRUM",
+                                        "polygon": "POLYGON",
+                                        "avalanche": "AVALANCHE",
+                                        "sui": "SUI",
+                                        "ton": "TON"
+                                    }
+                                    chain_name = chain_map.get(raw_chain, raw_chain.upper())
                                     
                                     if liquidity > 10000 and token_symbol not in seen_tokens:
                                         seen_tokens.add(token_address)
@@ -145,7 +161,7 @@ async def fetch_dex_tokens():
                                             "name": token_name,
                                             "price": price,
                                             "liquidity": liquidity,
-                                            "chain": chain_id
+                                            "chain": chain_name
                                         })
                         if len(filtered) >= 5:
                             break
@@ -307,7 +323,7 @@ async def dex_radar_handler(message: types.Message):
     text = "🐳 **توکن‌های ترند و پرنقدینگی On-Chain (شناسایی‌شده):**\n\n"
     for t in tokens:
         text += f"🪙 **{t['name']} ({t['symbol']})**\n"
-        text += f"🌐 شبکه: `{t['chain'].upper()}`\n"
+        text += f"🌐 شبکه: `{t['chain']}`\n"
         text += f"💵 قیمت: `${float(t['price']):.6f}`\n"
         text += f"💧 نقدینگی استخر: `${float(t['liquidity']):,.0f}`\n"
         text += "──────────────\n"
