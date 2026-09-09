@@ -72,6 +72,8 @@ async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=100):
         await exchange.close()
         
         closes = [c[4] for c in ohlcv]
+        highs = [c[2] for c in ohlcv]
+        lows = [c[3] for c in ohlcv]
         current_price = closes[-1]
         
         gains, losses = [], []
@@ -86,26 +88,49 @@ async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=100):
         rsi = 100 - (100 / (1 + rs))
         
         change_24h = ((current_price - closes[0]) / closes[0]) * 100
-        return formatted_symbol, current_price, rsi, change_24h
+        
+        # Calculate recent resistance & support for drawing lines
+        resistance = max(highs[-20:])
+        support = min(lows[-20:])
+
+        return formatted_symbol, current_price, rsi, change_24h, support, resistance
     except Exception as e:
         await exchange.close()
         logging.error(f"CCXT Error: {e}")
-        return None, None, None, None
+        return None, None, None, None, None, None
 
-# Real TradingView Chart Image Fetcher (Light Theme + RSI)
-async def fetch_chart_image(symbol: str, timeframe: str):
+# Advanced TradingView Chart Image Fetcher (Support/Resistance + Lines + RSI)
+async def fetch_chart_image(symbol: str, timeframe: str, support: float, resistance: float):
     clean_symbol = symbol.replace("/", "").upper()
     tf_map = {"15m": "15m", "1h": "1h", "4h": "4h", "1d": "1D"}
     interval = tf_map.get(timeframe, "1h")
 
     if CHART_IMG_API_KEY:
         url = "https://api.chart-img.com/v2/tradingview/advanced-chart"
+        
+        # Drawing technical elements (Support, Resistance & Channel lines)
+        drawings = []
+        if support and resistance:
+            drawings = [
+                {
+                    "type": "rayLine",
+                    "input": {"price": resistance},
+                    "options": {"lineColor": "red", "lineWidth": 2}
+                },
+                {
+                    "type": "rayLine",
+                    "input": {"price": support},
+                    "options": {"lineColor": "green", "lineWidth": 2}
+                }
+            ]
+
         payload = {
             "symbol": f"BINANCE:{clean_symbol}",
             "interval": interval,
             "theme": "light",
-            "width": 600,
-            "height": 900,
+            "width": 1000,
+            "height": 700,
+            "drawings": drawings,
             "studies": [
                 {
                     "name": "Relative Strength Index",
@@ -138,7 +163,7 @@ async def fetch_chart_image(symbol: str, timeframe: str):
 
 # AI Signal Generation with Retry Logic
 async def generate_signal(symbol: str, timeframe: str):
-    formatted_symbol, price, rsi, change_24h = await get_crypto_data(symbol, timeframe)
+    formatted_symbol, price, rsi, change_24h, support, resistance = await get_crypto_data(symbol, timeframe)
     if not price:
         return f"⚠️ ارز **{symbol}** پیدا نشد.", None
 
@@ -148,6 +173,8 @@ async def generate_signal(symbol: str, timeframe: str):
     - قیمت کنونی: {price} USDT
     - شاخص RSI: {rsi:.2f}
     - تغییرات: {change_24h:.2f}%
+    - حمایت نزدیک: {support}
+    - مقاومت نزدیک: {resistance}
 
     خروجی را دقیقا با همین فرمت فاقد متن اضافی بفرست:
     ⚡️ AlphaEngine Pro | #{formatted_symbol.replace('/', '')}
@@ -159,17 +186,17 @@ async def generate_signal(symbol: str, timeframe: str):
     🎯 ستاپ معاملاتی
     • موقعیت: [Long 🟢 یا Short 🔴]
     • نقطه ورود: {price}
-    • پله پشتیبان: [عدد منطقی]
+    • پله پشتیبان: {support}
 
     🚀 اهداف سودآوری (Take Profit)
     ▫️ TP1: [عدد]
     ▫️ TP2: [عدد]
-    ▫️ TP3: [عدد]
+    ▫️ TP3: {resistance}
 
     🛑 حد ضرر (Stop Loss): [عدد]
     ⚖️ ریسک به ریوارد: 1:2.2 | اهرم: Cross 3x-5x
 
-    🧩 تحلیل اکشن قیمت: [توضیح تحلیلی ۲ جمله‌ای]
+    🧩 تحلیل اکشن قیمت: [توضیح تحلیلی ۲ جمله‌ای با توجه به حمایت و مقاومت]
     """
 
     response_text = None
@@ -189,7 +216,7 @@ async def generate_signal(symbol: str, timeframe: str):
             else:
                 return "⚠️ سرور هوش مصنوعی در حال حاضر شلوغ است. لطفاً چند ثانیه دیگر مجدداً روی تایم‌فریم کلیک کنید.", None
 
-    chart_bytes = await fetch_chart_image(formatted_symbol, timeframe)
+    chart_bytes = await fetch_chart_image(formatted_symbol, timeframe, support, resistance)
     return response_text, chart_bytes
 
 # Handlers
@@ -198,7 +225,7 @@ async def start_cmd(message: types.Message):
     get_user(message.from_user.id)
     await message.answer(
         "👋 به **AlphaEngine Pro** خوش آمدید!\n\n"
-        "برای دریافت تحلیل و عکس نمودار TradingView، نام ارز را بفرستید (مثلاً `BTC` یا `ETH`).",
+        "برای دریافت تحلیل پیشرفته و چارت TradingView، نام ارز را بفرستید (مثلاً `BTC` یا `ETH`).",
         reply_markup=main_keyboard
     )
 
@@ -216,7 +243,7 @@ async def fear_and_greed(message: types.Message):
 @dp.callback_query(F.data.startswith("tf:"))
 async def handle_timeframe_click(callback: types.CallbackQuery):
     _, symbol, tf = callback.data.split(":")
-    await callback.message.edit_text(f"🔄 در حال دریافت چارت TradingView و تحلیل **{symbol}** در تایم‌فریم **{tf}**...")
+    await callback.message.edit_text(f"🔄 در حال دریافت چارت پیشرفته TradingView و تحلیل **{symbol}** در تایم‌فریم **{tf}**...")
     
     signal_text, chart_bytes = await generate_signal(symbol, tf)
     await callback.message.delete()
