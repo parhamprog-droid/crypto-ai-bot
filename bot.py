@@ -97,7 +97,7 @@ async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=100):
         logging.error(f"Error fetching CCXT data: {e}")
         return None, None, None, None
 
-# AI Signal Generation with Gemini
+# AI Signal Generation with Gemini (Fallback & Retry)
 async def generate_signal(symbol="ETH/USDT", timeframe="1h"):
     price, rsi, change_24h, closes = await get_crypto_data(symbol, timeframe)
     if not price:
@@ -133,15 +133,22 @@ async def generate_signal(symbol="ETH/USDT", timeframe="1h"):
     🧩 تحلیل اکشن قیمت: [توضیح تحلیلی ۲ جمله‌ای بر اساس RSI و اکشن قیمت]
     """
 
-    try:
-        response = ai_client.models.generate_content(
-            model='gemini-3.6-flash',
-            contents=prompt
-        )
-        return response.text
-    except Exception as e:
-        logging.error(f"Gemini Error: {e}")
-        return f"⚠️ خطا در پردازش هوش مصنوعی: {e}"
+    models_to_try = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash']
+
+    for model_name in models_to_try:
+        for attempt in range(2):
+            try:
+                response = ai_client.models.generate_content(
+                    model=model_name,
+                    contents=prompt
+                )
+                if response and response.text:
+                    return response.text
+            except Exception as e:
+                logging.warning(f"Failed attempt {attempt+1} on {model_name}: {e}")
+                await asyncio.sleep(1)
+
+    return "⚠️ سرورهای هوش مصنوعی در حال حاضر بیش از حد شلوغ هستند. لطفاً ۱۰ ثانیه دیگر دوباره امتحان کنید."
 
 # Telegram Commands & Handlers
 @dp.message(Command("start"))
