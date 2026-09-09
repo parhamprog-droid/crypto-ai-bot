@@ -5,11 +5,9 @@ import io
 import ccxt.async_support as ccxt
 import aiohttp
 import pandas as pd
-import numpy as np
 import matplotlib
-matplotlib.use('Agg')  # Non-interactive backend for server
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import mplfinance as mpf
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -23,10 +21,8 @@ from aiohttp import web
 
 logging.basicConfig(level=logging.INFO)
 
-# Config & Envs
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-ADMIN_ID = os.getenv("ADMIN_ID")
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
@@ -39,7 +35,6 @@ def get_user(user_id: int):
         user_data[user_id] = {"usage_count": 0, "is_vip": False}
     return user_data[user_id]
 
-# Keyboards
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📊 شاخص ترس و طمع"), KeyboardButton(text="🧮 محاسبه ریسک")],
@@ -58,9 +53,9 @@ def timeframe_keyboard(symbol: str):
         ]
     ])
 
-# Fetch Candle Data from KuCoin
+# Fetch Candle Data from Binance (Extremely Reliable)
 async def get_crypto_dataframe(symbol="ETH/USDT", timeframe="1h", limit=80):
-    exchange = ccxt.kucoin()
+    exchange = ccxt.binance()
     try:
         formatted_symbol = symbol.upper().strip()
         if not formatted_symbol.endswith("/USDT") and not formatted_symbol.endswith("USDT"):
@@ -73,9 +68,7 @@ async def get_crypto_dataframe(symbol="ETH/USDT", timeframe="1h", limit=80):
         
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
         
-        # Calculate RSI
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -89,84 +82,70 @@ async def get_crypto_dataframe(symbol="ETH/USDT", timeframe="1h", limit=80):
         logging.error(f"CCXT Error: {e}")
         return None, None
 
-# Generate Professional Custom Chart Image (Exact match to target image)
 def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
     clean_symbol = symbol.replace("/", "")
     
-    # Custom light style
-    mc = mpf.make_marketcolors(
-        up='#089981', down='#f23645',
-        edge='inherit',
-        wick='inherit',
-        volume='in'
-    )
-    style = mpf.make_mpf_style(
-        marketcolors=mc,
-        gridcolor='#e0e0e0',
-        gridstyle='--',
-        y_on_right=True,
-        figcolor='#f8f9fa',
-        facecolor='#ffffff'
-    )
+    fig, (ax_main, ax_rsi) = plt.subplots(2, 1, figsize=(11, 6.5), gridspec_kw={'height_ratios': [3, 1]}, facecolor='#f8f9fa')
+    ax_main.set_facecolor('#ffffff')
+    ax_rsi.set_facecolor('#ffffff')
 
-    # Plot setup with 2 panels (Main + RSI)
-    fig, axes = mpf.plot(
-        df,
-        type='candle',
-        style=style,
-        volume=False,
-        panel_ratios=(3, 1),
-        figsize=(12, 7),
-        returnfig=True
-    )
-    
-    ax_main = axes[0]
-    ax_rsi = axes[2] if len(axes) > 2 else axes[1]
-
-    # Calculate Key Levels for Drawing
-    closes = df['Close'].values
-    highs = df['High'].values
-    lows = df['Low'].values
     n = len(df)
     
-    recent_high = max(highs[-30:])
-    recent_low = min(lows[-30:])
-    last_price = closes[-1]
+    # Custom Candlestick rendering
+    for i in range(n):
+        open_p = df['Open'].iloc[i]
+        close_p = df['Close'].iloc[i]
+        high_p = df['High'].iloc[i]
+        low_p = df['Low'].iloc[i]
+        
+        color = '#089981' if close_p >= open_p else '#f23645'
+        
+        ax_main.plot([i, i], [low_p, high_p], color=color, linewidth=1)
+        ax_main.bar(i, abs(close_p - open_p), bottom=min(open_p, close_p), color=color, width=0.6)
 
-    # Draw Channel / Trend lines
-    ax_main.plot([0, n-1], [highs[0], recent_high], color='#8b0000', linestyle='-', linewidth=1.2, alpha=0.7)
-    ax_main.plot([0, n-1], [lows[0], recent_low], color='#006400', linestyle='-', linewidth=1.2, alpha=0.7)
+    # Key Levels & Lines
+    recent_high = df['High'].iloc[-30:].max()
+    recent_low = df['Low'].iloc[-30:].min()
+    last_price = df['Close'].iloc[-1]
+
+    # Upper/Lower Channel Lines
+    ax_main.plot([0, n-1], [df['High'].iloc[0], recent_high], color='#8b0000', linestyle='-', linewidth=1, alpha=0.7)
+    ax_main.plot([0, n-1], [df['Low'].iloc[0], recent_low], color='#006400', linestyle='-', linewidth=1, alpha=0.7)
     
-    # Draw Support / Resistance Hatch Area (Support Zone)
+    # Support Box (Hatch Area)
     support_box_bottom = recent_low * 0.995
-    ax_main.axhspan(support_box_bottom, recent_low, facecolor='#ffcccc', edgecolor='red', hatch='//', alpha=0.5)
+    ax_main.axhspan(support_box_bottom, recent_low, facecolor='#ffcccc', edgecolor='red', hatch='//', alpha=0.4)
     
-    # Current Price Line
+    # Current Price Horizontal
     ax_main.axhline(y=last_price, color='red', linestyle='--', linewidth=1)
-    ax_main.text(n-1, last_price, f" {last_price:.4f}", color='white', backgroundcolor='red', fontsize=9, fontweight='bold', va='center')
+    ax_main.text(n-1, last_price, f" {last_price:.4f}", color='white', backgroundcolor='red', fontsize=8, fontweight='bold', va='center')
 
-    # Watermark Header
-    ax_main.set_title(f"{clean_symbol} {timeframe} - AlphaEngine Pro : @AlphaEngineBot", fontsize=13, fontweight='bold', pad=12, color='#222222')
+    # Grid & Titles
+    ax_main.grid(True, linestyle='--', alpha=0.5, color='#e0e0e0')
+    ax_main.set_title(f"{clean_symbol} {timeframe} - Start using Turbo Trade Bot today : @tbsignalbot", fontsize=12, fontweight='bold', pad=10, color='#222222')
+    ax_main.yaxis.tick_right()
 
-    # Plot RSI Indicator
-    ax_rsi.plot(df.index, df['RSI'], color='#8a2be2', linewidth=1.5)
-    ax_rsi.axhline(70, color='gray', linestyle='--', linewidth=1)
-    ax_rsi.axhline(30, color='gray', linestyle='--', linewidth=1)
-    ax_rsi.fill_between(df.index, 30, 70, color='#e6e6fa', alpha=0.5)
+    # RSI Plot
+    ax_rsi.plot(range(n), df['RSI'], color='#8a2be2', linewidth=1.2)
+    ax_rsi.axhline(70, color='gray', linestyle='--', linewidth=0.8)
+    ax_rsi.axhline(30, color='gray', linestyle='--', linewidth=0.8)
+    ax_rsi.fill_between(range(n), 30, 70, color='#e6e6fa', alpha=0.4)
     ax_rsi.set_ylim(0, 100)
-    ax_rsi.set_title("RSI @AlphaEngineBot", fontsize=11, fontweight='bold', pad=6, color='#333333')
+    ax_rsi.grid(True, linestyle='--', alpha=0.5, color='#e0e0e0')
+    ax_rsi.set_title("RSI @tbsignalbot", fontsize=10, fontweight='bold', pad=5, color='#333333')
+    ax_rsi.yaxis.tick_right()
 
+    plt.tight_layout()
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', dpi=150)
+    plt.savefig(buf, format='png', bbox_inches='tight', dpi=130)
     plt.close(fig)
     buf.seek(0)
     return buf.getvalue()
 
-# AI Signal Generation with Retry Logic
 async def generate_signal(symbol: str, timeframe: str):
     formatted_symbol, df = await get_crypto_dataframe(symbol, timeframe)
     if df is None or df.empty:
-        return f"⚠️ ارز **{symbol}** پیدا نشد.", None
+        return f"⚠️ ارز **{symbol}** پیدا نشد. لطفاً نماد معتبر وارد کنید.", None
 
     price = df['Close'].iloc[-1]
     rsi = df['RSI'].iloc[-1]
@@ -222,7 +201,6 @@ async def generate_signal(symbol: str, timeframe: str):
     chart_bytes = await asyncio.to_thread(generate_custom_chart, df, formatted_symbol, timeframe)
     return response_text, chart_bytes
 
-# Handlers
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     get_user(message.from_user.id)
@@ -245,8 +223,9 @@ async def fear_and_greed(message: types.Message):
 
 @dp.callback_query(F.data.startswith("tf:"))
 async def handle_timeframe_click(callback: types.CallbackQuery):
+    await callback.answer()  # پاسخ آنی به تلگرام جهت جلوگیری از اکسپایر شدن دکمه
     _, symbol, tf = callback.data.split(":")
-    await callback.message.edit_text(f"🔄 در حال تولید چارت تحلیلی و دریافت سیگنال برای **{symbol}**...")
+    await callback.message.edit_text(f"🔄 در حال دریافت چارت و سیگنال **{symbol}**...")
     
     signal_text, chart_bytes = await generate_signal(symbol, tf)
     await callback.message.delete()
@@ -256,8 +235,6 @@ async def handle_timeframe_click(callback: types.CallbackQuery):
         await callback.message.answer_photo(photo=photo_file, caption=signal_text)
     else:
         await callback.message.answer(signal_text)
-        
-    await callback.answer()
 
 @dp.message(F.text)
 async def handle_symbol_input(message: types.Message):
@@ -270,9 +247,8 @@ async def handle_symbol_input(message: types.Message):
         reply_markup=timeframe_keyboard(symbol_text)
     )
 
-# Web Server Setup
 async def handle_web(request):
-    return web.Response(text="AlphaEngine Pro v3 Active!")
+    return web.Response(text="AlphaEngine Pro Active!")
 
 app = web.Application()
 app.router.add_get('/', handle_web)
