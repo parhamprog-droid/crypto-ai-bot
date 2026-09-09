@@ -11,7 +11,6 @@ from aiogram.types import (
     BufferedInputFile
 )
 from google import genai
-from google.genai import types as genai_types
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
 
@@ -86,28 +85,28 @@ async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=100):
         rsi = 100 - (100 / (1 + rs))
         
         change_24h = ((current_price - closes[0]) / closes[0]) * 100
-        return formatted_symbol, current_price, rsi, change_24h
+        return formatted_symbol, current_price, rsi, change_24h, closes[-10:]
     except Exception as e:
         await exchange.close()
         logging.error(f"CCXT Error: {e}")
-        return None, None, None, None
+        return None, None, None, None, []
 
-# Fetch Chart Image from TradingView API
-async def fetch_chart_image(symbol: str, timeframe: str):
+# Fetch Reliable Chart Image via QuickChart API
+async def fetch_chart_image(symbol: str, timeframe: str, prices: list):
     clean_symbol = symbol.replace("/", "").upper()
-    # Map timeframe to TradingView format
-    tf_map = {"15m": "15", "1h": "60", "4h": "240", "1d": "D"}
-    tv_tf = tf_map.get(timeframe, "60")
-    
-    chart_url = f"https://s3.tradingview.com/snapshots/{clean_symbol[0].lower()}/{clean_symbol}.png"
-    fallback_url = f"https://quickchart.io/chart?bkg=white&c={{type:'line',data={{labels:[1,2,3,4,5],datasets:[{{label:'{clean_symbol}',data:[10,15,13,17,20]}}]}}}}"
-    
-    # Generate TradingView Widget Snapshot via QuickChart
-    chart_api = f"https://quickchart.io/tradingview/snapshot?symbol=BINANCE:{clean_symbol}&timeframe={tv_tf}&width=800&height=500&theme=dark"
+    data_points = prices if prices else [10, 12, 11, 14, 13]
+    labels = [f"T{i+1}" for i in range(len(data_points))]
+
+    chart_url = (
+        f"https://quickchart.io/chart?bkg=white&c="
+        f"{{type:'line',data:{{labels:{labels},"
+        f"datasets:[{{label:'{clean_symbol} ({timeframe})',data:{data_points},"
+        f"borderColor:'rgb(75, 192, 192)',fill:false}}]}}}}"
+    )
 
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(chart_api) as resp:
+            async with session.get(chart_url, timeout=10) as resp:
                 if resp.status == 200:
                     return await resp.read()
         except Exception as e:
@@ -116,7 +115,7 @@ async def fetch_chart_image(symbol: str, timeframe: str):
 
 # AI Signal Generation
 async def generate_signal(symbol: str, timeframe: str):
-    formatted_symbol, price, rsi, change_24h = await get_crypto_data(symbol, timeframe)
+    formatted_symbol, price, rsi, change_24h, recent_prices = await get_crypto_data(symbol, timeframe)
     if not price:
         return f"⚠️ ارز **{symbol}** پیدا نشد.", None
 
@@ -156,7 +155,7 @@ async def generate_signal(symbol: str, timeframe: str):
             model="gemini-3.6-flash",
             contents=prompt
         )
-        chart_bytes = await fetch_chart_image(formatted_symbol, timeframe)
+        chart_bytes = await fetch_chart_image(formatted_symbol, timeframe, recent_prices)
         return response.text, chart_bytes
     except Exception as e:
         return f"⚠️ خطا در سرویس هوش مصنوعی: {e}", None
