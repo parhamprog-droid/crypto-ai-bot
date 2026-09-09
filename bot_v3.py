@@ -46,26 +46,11 @@ def get_user(user_id: int):
         }
     return user_data[user_id]
 
-# دریافت قیمت لحظه‌ای دلار / تتر به تومان
-async def get_live_usdt_toman():
-    url = "https://api.nobitex.ir/v2/orderbook/USDTIRT"
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, timeout=5) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    last_price_rial = float(data.get("bids", [[0]])[0][0])
-                    toman_price = last_price_rial / 10
-                    return toman_price
-        except Exception as e:
-            logging.error(f"USDT Price Fetch Error: {e}")
-    return 65000.0  # قیمت پیش‌فرض در صورت قطع ارتباط با API
-
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🚀 اسکنر ارزهای پامپی"), KeyboardButton(text="🐳 رادار توکن‌های جدید (DEX)")],
-        [KeyboardButton(text="📊 شاخص ترس و طمع"), KeyboardButton(text="💵 قیمت دلار / تتر")],
-        [KeyboardButton(text="🧮 محاسبه ریسک"), KeyboardButton(text="👤 حساب کاربری")]
+        [KeyboardButton(text="📊 شاخص ترس و طمع"), KeyboardButton(text="🧮 محاسبه ریسک")],
+        [KeyboardButton(text="👤 حساب کاربری")]
     ],
     resize_keyboard=True
 )
@@ -321,16 +306,6 @@ async def set_vip_cmd(message: types.Message):
         await message.answer(f"✅ کاربر `{target_id}` با موفقیت به **VIP** ارتقا یافت.", parse_mode="Markdown")
     except Exception:
         await message.answer("⚠️ فرمت دستور نادرست است. مثال: `/setvip 123456789`", parse_mode="Markdown")
-
-@dp.message(F.text == "💵 قیمت دلار / تتر")
-async def live_usdt_price_handler(message: types.Message):
-    usdt_price = await get_live_usdt_toman()
-    await message.answer(
-        f"💵 **قیمت لحظه‌ای دلار (تتر):**\n\n"
-        f"👑 نرخ فعلی بازار: **{usdt_price:,.0f} تومان**\n"
-        f"🔄 استعلام آنی از بازار آزاد",
-        parse_mode="Markdown"
-    )
 
 @dp.message(F.text == "🚀 اسکنر ارزهای پامپی")
 async def pump_scanner_handler(message: types.Message):
@@ -609,7 +584,7 @@ async def handle_text_input(message: types.Message):
         return
 
     symbol_text = text.upper()
-    if symbol_text.startswith("/") or symbol_text in ["🚀 اسکنر ارزهای پامپی", "🐳 رادار توکن‌های جدید (DEX)", "📊 شاخص ترس و طمع", "💵 قیمت دلار / تتر", "🧮 محاسبه ریسک", "👤 حساب کاربری"]:
+    if symbol_text.startswith("/") or symbol_text in ["🚀 اسکنر ارزهای پامپی", "🐳 رادار توکن‌های جدید (DEX)", "📊 شاخص ترس و طمع", "🧮 محاسبه ریسک", "👤 حساب کاربری"]:
         return
 
     await message.answer(
