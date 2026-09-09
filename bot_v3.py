@@ -25,11 +25,9 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "8800494482"))
 
-# اطلاعات پرداخت (این مقادیر را مطابق با خودتان تغییر دهید)
-PAYMENT_CARD = "۶۰۳۷-۹۹۷۹-۰۰۰۰-۰۰۰۰ (به نام ...)"
-PAYMENT_USDT_TRC20 = "TYourUsdtWalletAddressHereXXXXXXXX"
-VIP_PRICE_TOMAN = "۲۵۰,۰۰۰ تومان"
-VIP_PRICE_USDT = "5 USDT"
+# اطلاعات پرداخت شما
+PAYMENT_CARD = "۶۲۱۹-۸۶۱۹-۵۳۴۳-۶۷۰۵ (به نام پرهام جعفری)"
+VIP_PRICE_TOMAN = "۲۳۵,۰۰۰ تومان"
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
@@ -48,11 +46,26 @@ def get_user(user_id: int):
         }
     return user_data[user_id]
 
+# دریافت قیمت لحظه‌ای دلار / تتر به تومان
+async def get_live_usdt_toman():
+    url = "https://api.nobitex.ir/v2/orderbook/USDTIRT"
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, timeout=5) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    last_price_rial = float(data.get("bids", [[0]])[0][0])
+                    toman_price = last_price_rial / 10
+                    return toman_price
+        except Exception as e:
+            logging.error(f"USDT Price Fetch Error: {e}")
+    return 65000.0  # قیمت پیش‌فرض در صورت قطع ارتباط با API
+
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🚀 اسکنر ارزهای پامپی"), KeyboardButton(text="🐳 رادار توکن‌های جدید (DEX)")],
-        [KeyboardButton(text="📊 شاخص ترس و طمع"), KeyboardButton(text="🧮 محاسبه ریسک")],
-        [KeyboardButton(text="👤 حساب کاربری")]
+        [KeyboardButton(text="📊 شاخص ترس و طمع"), KeyboardButton(text="💵 قیمت دلار / تتر")],
+        [KeyboardButton(text="🧮 محاسبه ریسک"), KeyboardButton(text="👤 حساب کاربری")]
     ],
     resize_keyboard=True
 )
@@ -309,6 +322,16 @@ async def set_vip_cmd(message: types.Message):
     except Exception:
         await message.answer("⚠️ فرمت دستور نادرست است. مثال: `/setvip 123456789`", parse_mode="Markdown")
 
+@dp.message(F.text == "💵 قیمت دلار / تتر")
+async def live_usdt_price_handler(message: types.Message):
+    usdt_price = await get_live_usdt_toman()
+    await message.answer(
+        f"💵 **قیمت لحظه‌ای دلار (تتر):**\n\n"
+        f"👑 نرخ فعلی بازار: **{usdt_price:,.0f} تومان**\n"
+        f"🔄 استعلام آنی از بازار آزاد",
+        parse_mode="Markdown"
+    )
+
 @dp.message(F.text == "🚀 اسکنر ارزهای پامپی")
 async def pump_scanner_handler(message: types.Message):
     user = get_user(message.from_user.id)
@@ -409,7 +432,6 @@ async def user_profile(message: types.Message):
     else:
         await message.answer(profile_msg, parse_mode="Markdown")
 
-# کلیک روی خرید VIP
 @dp.callback_query(F.data == "buy_vip")
 async def handle_buy_vip_click(callback: types.CallbackQuery):
     await callback.answer()
@@ -418,27 +440,23 @@ async def handle_buy_vip_click(callback: types.CallbackQuery):
     
     pay_msg = (
         "💎 **راهنمای خرید اشتراک VIP:**\n\n"
-        f"💰 **هزینه اشتراک:** `{VIP_PRICE_TOMAN}` یا `{VIP_PRICE_USDT}`\n\n"
+        f"💰 **هزینه اشتراک:** `{VIP_PRICE_TOMAN}`\n\n"
         f"💳 **شماره کارت:**\n`{PAYMENT_CARD}`\n\n"
-        f"🌐 **آدرس ولت تتر (TRC20):**\n`{PAYMENT_USDT_TRC20}`\n\n"
         "📸 **مراحل فعال‌سازی:**\n"
         "۱. مبلغ را واریز کنید.\n"
-        "۲. **عکس فیش واریزی یا عکس تراکنش** را همین‌جا در ربات ارسال کنید.\n"
+        "۲. **عکس فیش واریزی** را همین‌جا در ربات ارسال کنید.\n"
         "۳. پس از بررسی ادمین، حساب شما فوراً VIP خواهد شد."
     )
     await callback.message.answer(pay_msg, parse_mode="Markdown")
 
-# دریافت فیش واریزی از کاربر (تصویر)
 @dp.message(F.photo)
 async def handle_receipt_photo(message: types.Message):
     user = get_user(message.from_user.id)
     if user.get("state") == "awaiting_payment_receipt":
         user["state"] = None
         
-        # ارسال پیام به کاربر
         await message.answer("✅ **فیش واریزی شما دریافت شد.**\nپس از بررسی ادمین، اشتراک شما فعال می‌گردد.")
         
-        # forwarding فیش به ادمین به همراه دکمه‌های تأیید/رد
         caption = (
             f"📥 **درخواست جدید خرید VIP**\n\n"
             f"👤 کاربر: {message.from_user.full_name}\n"
@@ -454,7 +472,6 @@ async def handle_receipt_photo(message: types.Message):
             parse_mode="Markdown"
         )
 
-# کلیک ادمین روی دکمه تأیید یا رد
 @dp.callback_query(F.data.startswith("approve_vip:"))
 async def approve_vip_handler(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
@@ -465,10 +482,8 @@ async def approve_vip_handler(callback: types.CallbackQuery):
     u = get_user(target_id)
     u["is_vip"] = True
     
-    # تغییر پیام ادمین
     await callback.message.edit_caption(caption=f"{callback.message.caption}\n\n✅ **تأیید شد و VIP فعال گردید.**")
     
-    # اطلاع‌رسانی به کاربر
     try:
         await bot.send_message(
             chat_id=target_id,
@@ -594,7 +609,7 @@ async def handle_text_input(message: types.Message):
         return
 
     symbol_text = text.upper()
-    if symbol_text.startswith("/") or symbol_text in ["🚀 اسکنر ارزهای پامپی", "🐳 رادار توکن‌های جدید (DEX)", "📊 شاخص ترس و طمع", "🧮 محاسبه ریسک", "👤 حساب کاربری"]:
+    if symbol_text.startswith("/") or symbol_text in ["🚀 اسکنر ارزهای پامپی", "🐳 رادار توکن‌های جدید (DEX)", "📊 شاخص ترس و طمع", "💵 قیمت دلار / تتر", "🧮 محاسبه ریسک", "👤 حساب کاربری"]:
         return
 
     await message.answer(
