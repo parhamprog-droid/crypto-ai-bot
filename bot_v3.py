@@ -37,8 +37,9 @@ def get_user(user_id: int):
 
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="🚀 اسکنر ارزهای پامپی"), KeyboardButton(text="📊 شاخص ترس و طمع")],
-        [KeyboardButton(text="🧮 محاسبه ریسک"), KeyboardButton(text="👤 حساب کاربری")]
+        [KeyboardButton(text="🚀 اسکنر ارزهای پامپی"), KeyboardButton(text="🐳 رادار توکن‌های جدید (DEX)")],
+        [KeyboardButton(text="📊 شاخص ترس و طمع"), KeyboardButton(text="🧮 محاسبه ریسک")],
+        [KeyboardButton(text="👤 حساب کاربری")]
     ],
     resize_keyboard=True
 )
@@ -81,7 +82,6 @@ async def get_crypto_dataframe(symbol="BTC/USDT", timeframe="1h", limit=80):
         logging.error(f"CCXT Error ({symbol}): {e}")
         return None, None
 
-# Pump Scanner Function
 async def scan_pump_candidates():
     exchange = ccxt.coinex()
     try:
@@ -92,7 +92,7 @@ async def scan_pump_candidates():
         for symbol, data in tickers.items():
             if symbol.endswith("/USDT") and data.get('quoteVolume') and data['quoteVolume'] > 100000:
                 change = data.get('percentage', 0)
-                if 5 <= change <= 30:  # Potential pump zone
+                if 5 <= change <= 30:
                     candidates.append({
                         'symbol': symbol,
                         'change': change,
@@ -105,6 +105,29 @@ async def scan_pump_candidates():
         await exchange.close()
         logging.error(f"Scanner Error: {e}")
         return []
+
+async def fetch_dex_tokens():
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get("https://api.dexscreener.com/latest/dex/search?q=solana") as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    pairs = data.get("pairs", [])
+                    filtered = []
+                    for pair in pairs[:10]:
+                        liquidity = pair.get("liquidity", {}).get("usd", 0)
+                        if liquidity > 50000:  # حداقل نقدینگی ۵۰ هزار دلار جهت امنیت بیشتر
+                            filtered.append({
+                                "symbol": pair.get("baseToken", {}).get("symbol", "N/A"),
+                                "name": pair.get("baseToken", {}).get("name", "N/A"),
+                                "price": pair.get("priceUsd", "0"),
+                                "liquidity": liquidity,
+                                "chain": pair.get("chainId", "N/A")
+                            })
+                    return filtered[:5]
+        except Exception as e:
+            logging.error(f"DEX Fetch Error: {e}")
+            return []
 
 def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
     clean_symbol = symbol.replace("/", "")
@@ -246,6 +269,26 @@ async def pump_scanner_handler(message: types.Message):
     text += "\n💡 *برای دریافت تحلیل دقیق هر ارز، نام آن را ارسال کنید.*"
     await msg.edit_text(text, parse_mode="Markdown")
 
+@dp.message(F.text == "🐳 رادار توکن‌های جدید (DEX)")
+async def dex_radar_handler(message: types.Message):
+    msg = await message.answer("🔎 در حال استعلام آخرین توکن‌های پرنقدینگی در صرافی‌های غیرمتمرکز...")
+    tokens = await fetch_dex_tokens()
+    
+    if not tokens:
+        await msg.edit_text("⚠️ اطلاعات توکن‌های غیرمتمرکز دریافت نشد.")
+        return
+    
+    text = "🐳 **توکن‌های پرنقدینگی On-Chain (شناسایی‌شده):**\n\n"
+    for t in tokens:
+        text += f"🪙 **{t['name']} ({t['symbol']})**\n"
+        text += f"🌐 شبکه: `{t['chain'].upper()}`\n"
+        text += f"💵 قیمت: `${float(t['price']):.6f}`\n"
+        text += f"💧 نقدینگی استخر: `${t['liquidity']:,.0f}`\n"
+        text += "──────────────\n"
+    
+    text += "\n⚠️ *توجه: معامله توکن‌های DEX ریسک بالا دارد. حتماً حد ضرر را رعایت کنید.*"
+    await msg.edit_text(text, parse_mode="Markdown")
+
 @dp.message(F.text == "📊 شاخص ترس و طمع")
 async def fear_and_greed(message: types.Message):
     async with aiohttp.ClientSession() as session:
@@ -275,7 +318,7 @@ async def handle_timeframe_click(callback: types.CallbackQuery):
 @dp.message(F.text)
 async def handle_symbol_input(message: types.Message):
     symbol_text = message.text.strip().upper()
-    if symbol_text.startswith("/") or symbol_text in ["🚀 اسکنر ارزهای پامپی", "📊 شاخص ترس و طمع", "🧮 محاسبه ریسک", "👤 حساب کاربری"]:
+    if symbol_text.startswith("/") or symbol_text in ["🚀 اسکنر ارزهای پامپی", "🐳 رادار توکن‌های جدید (DEX)", "📊 شاخص ترس و طمع", "🧮 محاسبه ریسک", "👤 حساب کاربری"]:
         return
 
     await message.answer(
