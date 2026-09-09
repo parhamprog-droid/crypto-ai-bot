@@ -24,7 +24,7 @@ if ADMIN_ID:
     except ValueError:
         logging.error("ADMIN_ID must be a numeric integer!")
 
-# Initialize Bot & Gemini Client (New SDK)
+# Initialize Bot & Gemini AI Client
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
@@ -97,7 +97,7 @@ async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=100):
         logging.error(f"Error fetching CCXT data: {e}")
         return None, None, None, None
 
-# AI Signal Generation with updated Gemini 3.6 Flash
+# AI Signal Generation with Gemini 3.6 Flash
 async def generate_signal(symbol="ETH/USDT", timeframe="1h"):
     price, rsi, change_24h, closes = await get_crypto_data(symbol, timeframe)
     if not price:
