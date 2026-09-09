@@ -106,7 +106,6 @@ async def scan_pump_candidates():
         logging.error(f"Scanner Error: {e}")
         return []
 
-# اصلاح تابع DEX جهت دریافت توکن‌های ترند و واقعی بدون تکرار
 async def fetch_dex_tokens():
     async with aiohttp.ClientSession() as session:
         try:
@@ -117,11 +116,9 @@ async def fetch_dex_tokens():
                     seen_symbols = set()
                     
                     for item in data:
-                        symbol = item.get("tokenAddress", "")[:6]
-                        if "tokenAddress" in item:
-                            chain = item.get("chainId", "N/A")
-                            # دریافت اطلاعات جزئی جفت‌ارز
-                            pair_url = f"https://api.dexscreener.com/latest/dex/tokens/{item['tokenAddress']}"
+                        token_address = item.get("tokenAddress")
+                        if token_address:
+                            pair_url = f"https://api.dexscreener.com/latest/dex/tokens/{token_address}"
                             async with session.get(pair_url) as p_resp:
                                 if p_resp.status == 200:
                                     p_data = await p_resp.json()
@@ -132,6 +129,7 @@ async def fetch_dex_tokens():
                                         token_name = best_pair.get("baseToken", {}).get("name", "N/A")
                                         price = best_pair.get("priceUsd", "0")
                                         liquidity = best_pair.get("liquidity", {}).get("usd", 0)
+                                        chain = best_pair.get("chainId", "N/A")
                                         
                                         if token_symbol not in seen_symbols and liquidity > 20000:
                                             seen_symbols.add(token_symbol)
