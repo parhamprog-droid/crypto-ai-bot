@@ -1,8 +1,16 @@
 import os
 import asyncio
 import logging
+import io
 import ccxt.async_support as ccxt
 import aiohttp
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend for server
+import matplotlib.pyplot as plt
+import mplfinance as mpf
+
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import (
@@ -11,7 +19,6 @@ from aiogram.types import (
     BufferedInputFile
 )
 from google import genai
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
 
 logging.basicConfig(level=logging.INFO)
@@ -19,14 +26,7 @@ logging.basicConfig(level=logging.INFO)
 # Config & Envs
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-CHART_IMG_API_KEY = os.getenv("CHART_IMG_API_KEY")
 ADMIN_ID = os.getenv("ADMIN_ID")
-
-if ADMIN_ID:
-    try:
-        ADMIN_ID = int(ADMIN_ID.strip())
-    except ValueError:
-        ADMIN_ID = None
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
@@ -59,7 +59,7 @@ def timeframe_keyboard(symbol: str):
     ])
 
 # Fetch Candle Data from KuCoin
-async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=100):
+async def get_crypto_dataframe(symbol="ETH/USDT", timeframe="1h", limit=80):
     exchange = ccxt.kucoin()
     try:
         formatted_symbol = symbol.upper().strip()
@@ -71,101 +71,106 @@ async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=100):
         ohlcv = await exchange.fetch_ohlcv(formatted_symbol, timeframe=timeframe, limit=limit)
         await exchange.close()
         
-        closes = [c[4] for c in ohlcv]
-        highs = [c[2] for c in ohlcv]
-        lows = [c[3] for c in ohlcv]
-        current_price = closes[-1]
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
         
-        gains, losses = [], []
-        for i in range(1, len(closes)):
-            diff = closes[i] - closes[i-1]
-            gains.append(max(diff, 0))
-            losses.append(max(-diff, 0))
-            
-        avg_gain = sum(gains[-14:]) / 14 if len(gains) >= 14 else 1
-        avg_loss = sum(losses[-14:]) / 14 if len(losses) >= 14 else 1
-        rs = avg_gain / (avg_loss if avg_loss != 0 else 1)
-        rsi = 100 - (100 / (1 + rs))
+        # Calculate RSI
+        delta = df['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['RSI'] = 100 - (100 / (1 + rs))
+        df['RSI'] = df['RSI'].fillna(50)
         
-        change_24h = ((current_price - closes[0]) / closes[0]) * 100
-        
-        # Calculate recent resistance & support for drawing lines
-        resistance = max(highs[-20:])
-        support = min(lows[-20:])
-
-        return formatted_symbol, current_price, rsi, change_24h, support, resistance
+        return formatted_symbol, df
     except Exception as e:
         await exchange.close()
         logging.error(f"CCXT Error: {e}")
-        return None, None, None, None, None, None
+        return None, None
 
-# Advanced TradingView Chart Image Fetcher (Support/Resistance + Lines + RSI)
-async def fetch_chart_image(symbol: str, timeframe: str, support: float, resistance: float):
-    clean_symbol = symbol.replace("/", "").upper()
-    tf_map = {"15m": "15m", "1h": "1h", "4h": "4h", "1d": "1D"}
-    interval = tf_map.get(timeframe, "1h")
+# Generate Professional Custom Chart Image (Exact match to target image)
+def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
+    clean_symbol = symbol.replace("/", "")
+    
+    # Custom light style
+    mc = mpf.make_marketcolors(
+        up='#089981', down='#f23645',
+        edge='inherit',
+        wick='inherit',
+        volume='in'
+    )
+    style = mpf.make_mpf_style(
+        marketcolors=mc,
+        gridcolor='#e0e0e0',
+        gridstyle='--',
+        y_on_right=True,
+        figcolor='#f8f9fa',
+        facecolor='#ffffff'
+    )
 
-    if CHART_IMG_API_KEY:
-        url = "https://api.chart-img.com/v2/tradingview/advanced-chart"
-        
-        # Drawing technical elements (Support, Resistance & Channel lines)
-        drawings = []
-        if support and resistance:
-            drawings = [
-                {
-                    "type": "rayLine",
-                    "input": {"price": resistance},
-                    "options": {"lineColor": "red", "lineWidth": 2}
-                },
-                {
-                    "type": "rayLine",
-                    "input": {"price": support},
-                    "options": {"lineColor": "green", "lineWidth": 2}
-                }
-            ]
+    # Plot setup with 2 panels (Main + RSI)
+    fig, axes = mpf.plot(
+        df,
+        type='candle',
+        style=style,
+        volume=False,
+        panel_ratios=(3, 1),
+        figsize=(12, 7),
+        returnfig=True
+    )
+    
+    ax_main = axes[0]
+    ax_rsi = axes[2] if len(axes) > 2 else axes[1]
 
-        payload = {
-            "symbol": f"BINANCE:{clean_symbol}",
-            "interval": interval,
-            "theme": "light",
-            "width": 1000,
-            "height": 700,
-            "drawings": drawings,
-            "studies": [
-                {
-                    "name": "Relative Strength Index",
-                    "forceOverlay": False
-                }
-            ]
-        }
-        headers = {
-            "authorization": f"Bearer {CHART_IMG_API_KEY}",
-            "content-type": "application/json"
-        }
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(url, json=payload, headers=headers, timeout=12) as resp:
-                    if resp.status == 200:
-                        return await resp.read()
-            except Exception as e:
-                logging.error(f"Chart-Img fetch error: {e}")
+    # Calculate Key Levels for Drawing
+    closes = df['Close'].values
+    highs = df['High'].values
+    lows = df['Low'].values
+    n = len(df)
+    
+    recent_high = max(highs[-30:])
+    recent_low = min(lows[-30:])
+    last_price = closes[-1]
 
-    # Fallback Image
-    fallback_url = f"https://quickchart.io/chart?bkg=white&c={{type:'line',data:{{labels:[1,2,3,4,5],datasets:[{{label:'{clean_symbol} ({timeframe})',data:[10,12,11,14,13],borderColor:'green'}}]}}}}"
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(fallback_url, timeout=5) as resp:
-                if resp.status == 200:
-                    return await resp.read()
-        except Exception:
-            pass
-    return None
+    # Draw Channel / Trend lines
+    ax_main.plot([0, n-1], [highs[0], recent_high], color='#8b0000', linestyle='-', linewidth=1.2, alpha=0.7)
+    ax_main.plot([0, n-1], [lows[0], recent_low], color='#006400', linestyle='-', linewidth=1.2, alpha=0.7)
+    
+    # Draw Support / Resistance Hatch Area (Support Zone)
+    support_box_bottom = recent_low * 0.995
+    ax_main.axhspan(support_box_bottom, recent_low, facecolor='#ffcccc', edgecolor='red', hatch='//', alpha=0.5)
+    
+    # Current Price Line
+    ax_main.axhline(y=last_price, color='red', linestyle='--', linewidth=1)
+    ax_main.text(n-1, last_price, f" {last_price:.4f}", color='white', backgroundcolor='red', fontsize=9, fontweight='bold', va='center')
+
+    # Watermark Header
+    ax_main.set_title(f"{clean_symbol} {timeframe} - AlphaEngine Pro : @AlphaEngineBot", fontsize=13, fontweight='bold', pad=12, color='#222222')
+
+    # Plot RSI Indicator
+    ax_rsi.plot(df.index, df['RSI'], color='#8a2be2', linewidth=1.5)
+    ax_rsi.axhline(70, color='gray', linestyle='--', linewidth=1)
+    ax_rsi.axhline(30, color='gray', linestyle='--', linewidth=1)
+    ax_rsi.fill_between(df.index, 30, 70, color='#e6e6fa', alpha=0.5)
+    ax_rsi.set_ylim(0, 100)
+    ax_rsi.set_title("RSI @AlphaEngineBot", fontsize=11, fontweight='bold', pad=6, color='#333333')
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight', dpi=150)
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
 
 # AI Signal Generation with Retry Logic
 async def generate_signal(symbol: str, timeframe: str):
-    formatted_symbol, price, rsi, change_24h, support, resistance = await get_crypto_data(symbol, timeframe)
-    if not price:
+    formatted_symbol, df = await get_crypto_dataframe(symbol, timeframe)
+    if df is None or df.empty:
         return f"⚠️ ارز **{symbol}** پیدا نشد.", None
+
+    price = df['Close'].iloc[-1]
+    rsi = df['RSI'].iloc[-1]
+    change_24h = ((price - df['Close'].iloc[0]) / df['Close'].iloc[0]) * 100
 
     prompt = f"""
     تو یک تحلیل‌گر تکنیکال ارشد کریپتو هستی. برای ارز {formatted_symbol} در تایم‌فریم {timeframe} تحلیل بنویس.
@@ -173,8 +178,6 @@ async def generate_signal(symbol: str, timeframe: str):
     - قیمت کنونی: {price} USDT
     - شاخص RSI: {rsi:.2f}
     - تغییرات: {change_24h:.2f}%
-    - حمایت نزدیک: {support}
-    - مقاومت نزدیک: {resistance}
 
     خروجی را دقیقا با همین فرمت فاقد متن اضافی بفرست:
     ⚡️ AlphaEngine Pro | #{formatted_symbol.replace('/', '')}
@@ -186,17 +189,17 @@ async def generate_signal(symbol: str, timeframe: str):
     🎯 ستاپ معاملاتی
     • موقعیت: [Long 🟢 یا Short 🔴]
     • نقطه ورود: {price}
-    • پله پشتیبان: {support}
+    • پله پشتیبان: [عدد منطقی]
 
     🚀 اهداف سودآوری (Take Profit)
     ▫️ TP1: [عدد]
     ▫️ TP2: [عدد]
-    ▫️ TP3: {resistance}
+    ▫️ TP3: [عدد]
 
     🛑 حد ضرر (Stop Loss): [عدد]
     ⚖️ ریسک به ریوارد: 1:2.2 | اهرم: Cross 3x-5x
 
-    🧩 تحلیل اکشن قیمت: [توضیح تحلیلی ۲ جمله‌ای با توجه به حمایت و مقاومت]
+    🧩 تحلیل اکشن قیمت: [توضیح تحلیلی ۲ جمله‌ای]
     """
 
     response_text = None
@@ -214,9 +217,9 @@ async def generate_signal(symbol: str, timeframe: str):
             if attempt < 2:
                 await asyncio.sleep(2)
             else:
-                return "⚠️ سرور هوش مصنوعی در حال حاضر شلوغ است. لطفاً چند ثانیه دیگر مجدداً روی تایم‌فریم کلیک کنید.", None
+                return "⚠️ سرور هوش مصنوعی در حال حاضر شلوغ است. لطفاً چند ثانیه دیگر مجدداً سعی کنید.", None
 
-    chart_bytes = await fetch_chart_image(formatted_symbol, timeframe, support, resistance)
+    chart_bytes = await asyncio.to_thread(generate_custom_chart, df, formatted_symbol, timeframe)
     return response_text, chart_bytes
 
 # Handlers
@@ -225,7 +228,7 @@ async def start_cmd(message: types.Message):
     get_user(message.from_user.id)
     await message.answer(
         "👋 به **AlphaEngine Pro** خوش آمدید!\n\n"
-        "برای دریافت تحلیل پیشرفته و چارت TradingView، نام ارز را بفرستید (مثلاً `BTC` یا `ETH`).",
+        "برای دریافت تحلیل و چارت اختصاصی، نام ارز را بفرستید (مثلاً `BTC` یا `ETH`).",
         reply_markup=main_keyboard
     )
 
@@ -243,7 +246,7 @@ async def fear_and_greed(message: types.Message):
 @dp.callback_query(F.data.startswith("tf:"))
 async def handle_timeframe_click(callback: types.CallbackQuery):
     _, symbol, tf = callback.data.split(":")
-    await callback.message.edit_text(f"🔄 در حال دریافت چارت پیشرفته TradingView و تحلیل **{symbol}** در تایم‌فریم **{tf}**...")
+    await callback.message.edit_text(f"🔄 در حال تولید چارت تحلیلی و دریافت سیگنال برای **{symbol}**...")
     
     signal_text, chart_bytes = await generate_signal(symbol, tf)
     await callback.message.delete()
