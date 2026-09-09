@@ -97,7 +97,7 @@ async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=100):
         logging.error(f"Error fetching CCXT data: {e}")
         return None, None, None, None
 
-# AI Signal Generation with Groq (Fallback Mechanism)
+# AI Signal Generation with Groq
 async def generate_signal(symbol="ETH/USDT", timeframe="1h"):
     price, rsi, change_24h, closes = await get_crypto_data(symbol, timeframe)
     if not price:
@@ -133,7 +133,7 @@ async def generate_signal(symbol="ETH/USDT", timeframe="1h"):
     🧩 تحلیل اکشن قیمت: [توضیح تحلیلی ۲ جمله‌ای بر اساس RSI و اکشن قیمت]
     """
 
-    models_to_try = ["llama-3.3-70b-versatile", "llama3-8b-8192", "mixtral-8x7b-32768"]
+    models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
     last_error = ""
 
     for model_name in models_to_try:
