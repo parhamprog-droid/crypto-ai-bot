@@ -23,16 +23,23 @@ logging.basicConfig(level=logging.INFO)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # آیدی عددی ادمین در متغیرهای محیطی
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
+# دیتابیس حافظه‌ای کاربران
 user_data = {}
 
 def get_user(user_id: int):
     if user_id not in user_data:
-        user_data[user_id] = {"usage_count": 0, "is_vip": False}
+        user_data[user_id] = {
+            "usage_count": 0,
+            "is_vip": False,
+            "state": None,
+            "risk_calc_data": {}
+        }
     return user_data[user_id]
 
 main_keyboard = ReplyKeyboardMarkup(
@@ -106,25 +113,11 @@ async def scan_pump_candidates():
         logging.error(f"Scanner Error: {e}")
         return []
 
-# تابع مدرن دریافت توکن‌های ترند DEX بدون نیاز به کلید یا دکس اسکرینر
 async def fetch_dex_tokens():
     headers = {
         'Accept': 'application/json',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
-    
-    chain_names = {
-        "solana": "SOLANA",
-        "eth": "ETHEREUM",
-        "bsc": "BINANCE SMART CHAIN",
-        "base": "BASE",
-        "arbitrum": "ARBITRUM",
-        "polygon_pos": "POLYGON",
-        "avax": "AVALANCHE",
-        "sui": "SUI",
-        "ton": "TON"
-    }
-
     url = "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1"
     
     async with aiohttp.ClientSession(headers=headers) as session:
@@ -156,7 +149,6 @@ async def fetch_dex_tokens():
         except Exception as e:
             logging.error(f"Gecko Fetch Error: {e}")
             
-    # فال‌بک صرافی‌های ثانویه در صورت بلاک بودن
     return [
         {"symbol": "BONK", "price": "0.000021", "liquidity": 1250000, "chain": "SOLANA"},
         {"symbol": "WIF", "price": "1.84", "liquidity": 3400000, "chain": "SOLANA"},
@@ -277,17 +269,44 @@ async def generate_signal(symbol: str, timeframe: str):
     chart_bytes = await asyncio.to_thread(generate_custom_chart, df, formatted_symbol, timeframe)
     return response_text, chart_bytes
 
+# 핸들러: دستور start
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
-    get_user(message.from_user.id)
+    user = get_user(message.from_user.id)
+    user["state"] = None
     await message.answer(
         "👋 به **AlphaEngine Pro** خوش آمدید!\n\n"
         "نام ارز مورد نظر خود را وارد کنید یا از دکمه‌های زیر استفاده کنید:",
         reply_markup=main_keyboard
     )
 
+# ادمین: ارتقای کاربر به VIP
+@dp.message(Command("setvip"))
+async def set_vip_cmd(message: types.Message):
+    if message.from_user.id != ADMIN_ID and ADMIN_ID != 0:
+        return
+    try:
+        args = message.text.split()
+        target_id = int(args[1])
+        u = get_user(target_id)
+        u["is_vip"] = True
+        await message.answer(f"✅ کاربر {target_id} با موفقیت به **VIP** ارتقا یافت.")
+    except Exception as e:
+        await message.answer("⚠️ فرمت دستور نادرست است. مثال: `/setvip 123456789`")
+
+# اسکنر پامپی (مخصوص VIP)
 @dp.message(F.text == "🚀 اسکنر ارزهای پامپی")
 async def pump_scanner_handler(message: types.Message):
+    user = get_user(message.from_user.id)
+    if not user["is_vip"]:
+        await message.answer(
+            "🔒 **این بخش مخصوص کاربران VIP است.**\n\n"
+            "برای دسترسی به اسکنر آنی ارزهای مستعد پامپ، اشتراک VIP خود را فعال کنید.\n"
+            "📩 جهت تهیه اشتراک با پشتیبانی تماس بگیرید.",
+            parse_mode="Markdown"
+        )
+        return
+
     msg = await message.answer("🔍 در حال اسکن بازار و شناسایی ارزهای مستعد پامپ...")
     candidates = await scan_pump_candidates()
     
@@ -305,8 +324,19 @@ async def pump_scanner_handler(message: types.Message):
     text += "\n💡 *برای دریافت تحلیل دقیق هر ارز، نام آن را ارسال کنید.*"
     await msg.edit_text(text, parse_mode="Markdown")
 
+# رادار DEX (مخصوص VIP)
 @dp.message(F.text == "🐳 رادار توکن‌های جدید (DEX)")
 async def dex_radar_handler(message: types.Message):
+    user = get_user(message.from_user.id)
+    if not user["is_vip"]:
+        await message.answer(
+            "🔒 **این بخش مخصوص کاربران VIP است.**\n\n"
+            "برای رصد لحظه‌ای توکن‌های پرنقدینگی On-Chain، اشتراک VIP تهیه کنید.\n"
+            "📩 جهت تهیه اشتراک به پشتیبانی پیام دهید.",
+            parse_mode="Markdown"
+        )
+        return
+
     msg = await message.answer("🔎 در حال استعلام آخرین توکن‌های پرنقدینگی در صرافی‌های غیرمتمرکز...")
     tokens = await fetch_dex_tokens()
     
@@ -325,6 +355,7 @@ async def dex_radar_handler(message: types.Message):
     text += "\n⚠️ *توجه: معامله توکن‌های DEX ریسک بالا دارد. حتماً حد ضرر را رعایت کنید.*"
     await msg.edit_text(text, parse_mode="Markdown")
 
+# شاخص ترس و طمع
 @dp.message(F.text == "📊 شاخص ترس و طمع")
 async def fear_and_greed(message: types.Message):
     async with aiohttp.ClientSession() as session:
@@ -336,9 +367,49 @@ async def fear_and_greed(message: types.Message):
                     f"📊 **شاخص ترس و طمع:**\n\n🎯 عدد: **{item['value']}/100**\n📌 وضعیت: **{item['value_classification']}**"
                 )
 
+# ماشین‌حساب محاسبه ریسک
+@dp.message(F.text == "🧮 محاسبه ریسک")
+async def start_risk_calc(message: types.Message):
+    user = get_user(message.from_user.id)
+    user["state"] = "awaiting_capital"
+    user["risk_calc_data"] = {}
+    await message.answer(
+        "🧮 **ماشین‌حساب هوشمند مدیریت ریسک**\n\n"
+        "لطفاً **موجودی کل حساب (به دلار)** را وارد کنید:\n"
+        "*(مثال: 1000)*"
+    )
+
+# حساب کاربری
+@dp.message(F.text == "👤 حساب کاربری")
+async def user_profile(message: types.Message):
+    user = get_user(message.from_user.id)
+    status_text = "💎 **VIP (نامحدود)**" if user["is_vip"] else "👤 **رایگان**"
+    limit_text = "نامحدود" if user["is_vip"] else f"{user['usage_count']} / 3 استفاده امروز"
+    
+    profile_msg = (
+        f"👤 **پروفایل کاربری شما:**\n\n"
+        f"🆔 شناسه عددی: `{message.from_user.id}`\n"
+        f"👑 وضعیت اشتراک: {status_text}\n"
+        f"📊 تحلیل‌های امروز: `{limit_text}`\n\n"
+    )
+    if not user["is_vip"]:
+        profile_msg += "💡 *با ارتقا به VIP، به اسکنر پامپی، رادار DEX و تحلیل نامحدود دسترسی پیدا کنید.*"
+    
+    await message.answer(profile_msg, parse_mode="Markdown")
+
+# کلیک روی تایم‌فریم‌ها
 @dp.callback_query(F.data.startswith("tf:"))
 async def handle_timeframe_click(callback: types.CallbackQuery):
     await callback.answer()
+    user = get_user(callback.from_user.id)
+    
+    if not user["is_vip"] and user["usage_count"] >= 3:
+        await callback.message.edit_text(
+            "⚠️ **سقف استفاده روزانه شما (۳ بار) به پایان رسیده است.**\n\n"
+            "برای دریافت تحلیل‌های نامحدود، اشتراک **VIP** تهیه کنید."
+        )
+        return
+
     _, symbol, tf = callback.data.split(":")
     await callback.message.edit_text(f"🔄 در حال محاسبه ستاپ هوشمند و چارت **{symbol}**...")
     
@@ -348,12 +419,86 @@ async def handle_timeframe_click(callback: types.CallbackQuery):
     if chart_bytes:
         photo_file = BufferedInputFile(chart_bytes, filename=f"{symbol}_chart.png")
         await callback.message.answer_photo(photo=photo_file, caption=signal_text)
+        if not user["is_vip"]:
+            user["usage_count"] += 1
     else:
         await callback.message.answer(signal_text)
 
+# ورودی متن عام (نام ارز یا ورودی‌های محاسبه ریسک)
 @dp.message(F.text)
-async def handle_symbol_input(message: types.Message):
-    symbol_text = message.text.strip().upper()
+async def handle_text_input(message: types.Message):
+    text = message.text.strip()
+    user = get_user(message.from_user.id)
+    state = user.get("state")
+
+    # مراحل ماشین‌حساب مدیریت ریسک
+    if state == "awaiting_capital":
+        try:
+            capital = float(text)
+            user["risk_calc_data"]["capital"] = capital
+            user["state"] = "awaiting_risk_pct"
+            await message.answer("درصد ریسک مد نظر در این معامله را وارد کنید:\n*(مثال: 1 یا 2)*")
+        except ValueError:
+            await message.answer("⚠️ لطفاً عدد معتبر وارد کنید (مثلاً 1000).")
+        return
+
+    elif state == "awaiting_risk_pct":
+        try:
+            risk_pct = float(text)
+            user["risk_calc_data"]["risk_pct"] = risk_pct
+            user["state"] = "awaiting_entry"
+            await message.answer("قیمت ورود (Entry Price) را وارد کنید:\n*(مثال: 65000)*")
+        except ValueError:
+            await message.answer("⚠️ لطفاً عدد معتبر وارد کنید (مثلاً 1.5).")
+        return
+
+    elif state == "awaiting_entry":
+        try:
+            entry = float(text)
+            user["risk_calc_data"]["entry"] = entry
+            user["state"] = "awaiting_sl"
+            await message.answer("قیمت حد ضرر (Stop Loss) را وارد کنید:\n*(مثال: 63500)*")
+        except ValueError:
+            await message.answer("⚠️ لطفاً عدد معتبر وارد کنید.")
+        return
+
+    elif state == "awaiting_sl":
+        try:
+            sl = float(text)
+            data = user["risk_calc_data"]
+            capital = data["capital"]
+            risk_pct = data["risk_pct"]
+            entry = data["entry"]
+
+            user["state"] = None  # ریست کردن استیت
+
+            risk_amount = capital * (risk_pct / 100)
+            sl_distance_pct = abs(entry - sl) / entry
+
+            if sl_distance_pct == 0:
+                await message.answer("⚠️ قیمت حد ضرر نمی‌تواند با قیمت ورود برابر باشد.")
+                return
+
+            position_size = risk_amount / sl_distance_pct
+
+            result_msg = (
+                f"🧮 **نتیجه محاسبه مدیریت ریسک:**\n\n"
+                f"💵 کل سرمایه: `${capital:,.2f}`\n"
+                f"🎯 میزان ریسک: `{risk_pct}%` (`${risk_amount:,.2f}`)\n"
+                f"📍 قیمت ورود: `${entry:,.4f}`\n"
+                f"🛑 قیمت حد ضرر: `${sl:,.4f}`\n"
+                f"📉 فاصله حد ضرر: `{sl_distance_pct*100:.2f}%`\n\n"
+                f"✅ **حجم پیشنهادی برای ورود به پوزیشن:**\n"
+                f"👉 `${position_size:,.2f}`\n\n"
+                f"💡 *توضیح: اگر با این حجم وارد شوید و حد ضرر شما بخورد، دقیقاً ${risk_amount:,.2f} ضرر خواهید کرد.*"
+            )
+            await message.answer(result_msg, parse_mode="Markdown")
+        except ValueError:
+            await message.answer("⚠️ لطفاً عدد معتبر وارد کنید.")
+        return
+
+    # دریافت نام نماد برای تحلیل
+    symbol_text = text.upper()
     if symbol_text.startswith("/") or symbol_text in ["🚀 اسکنر ارزهای پامپی", "🐳 رادار توکن‌های جدید (DEX)", "📊 شاخص ترس و طمع", "🧮 محاسبه ریسک", "👤 حساب کاربری"]:
         return
 
