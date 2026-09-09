@@ -6,8 +6,7 @@ import aiohttp
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from google import genai
-from google.genai import errors
+from groq import AsyncGroq
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
 
@@ -16,7 +15,7 @@ logging.basicConfig(level=logging.INFO)
 
 # Environment Variables
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 ADMIN_ID = os.getenv("ADMIN_ID")
 
 if ADMIN_ID:
@@ -25,10 +24,10 @@ if ADMIN_ID:
     except ValueError:
         logging.error("ADMIN_ID must be a numeric integer!")
 
-# Initialize Bot & Gemini
+# Initialize Bot & Groq AI
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
-ai_client = genai.Client(api_key=GEMINI_API_KEY)
+groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 
 # Active users storage
 user_ids = set()
@@ -98,7 +97,7 @@ async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=100):
         logging.error(f"Error fetching CCXT data: {e}")
         return None, None, None, None
 
-# AI Signal Generation with Gemini
+# AI Signal Generation with Groq (Llama-3.3-70b)
 async def generate_signal(symbol="ETH/USDT", timeframe="1h"):
     price, rsi, change_24h, closes = await get_crypto_data(symbol, timeframe)
     if not price:
@@ -134,25 +133,20 @@ async def generate_signal(symbol="ETH/USDT", timeframe="1h"):
     🧩 تحلیل اکشن قیمت: [توضیح تحلیلی ۲ جمله‌ای بر اساس RSI و اکشن قیمت]
     """
 
-    models_to_try = ['gemini-1.5-flash', 'gemini-1.5-pro']
-    
-    for model_name in models_to_try:
-        for attempt in range(2):
-            try:
-                response = ai_client.models.generate_content(
-                    model=model_name,
-                    contents=prompt
-                )
-                if response and response.text:
-                    return response.text
-            except errors.APIError as e:
-                logging.warning(f"API Error on {model_name}: {e}")
-                await asyncio.sleep(1)
-            except Exception as e:
-                logging.error(f"Unexpected Error on {model_name}: {e}")
-                await asyncio.sleep(1)
-
-    return "⚠️ خطا در ارتباط با هوش مصنوعی. لطفاً چند لحظه دیگر امتحان کنید."
+    try:
+        chat_completion = await groq_client.chat.completions.create(
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            model="llama-3.3-70b-versatile",
+        )
+        return chat_completion.choices[0].message.content
+    except Exception as e:
+        logging.error(f"Groq API Error: {e}")
+        return "⚠️ خطا در ارتباط با هوش مصنوعی. لطفاً دوباره تلاش کنید."
 
 # Telegram Commands & Handlers
 @dp.message(Command("start"))
