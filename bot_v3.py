@@ -92,7 +92,7 @@ async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=100):
         logging.error(f"CCXT Error: {e}")
         return None, None, None, None
 
-# Real TradingView Chart Image Fetcher
+# Real TradingView Chart Image Fetcher (Light Theme + RSI)
 async def fetch_chart_image(symbol: str, timeframe: str):
     clean_symbol = symbol.replace("/", "").upper()
     tf_map = {"15m": "15m", "1h": "1h", "4h": "4h", "1d": "1D"}
@@ -103,10 +103,15 @@ async def fetch_chart_image(symbol: str, timeframe: str):
         payload = {
             "symbol": f"BINANCE:{clean_symbol}",
             "interval": interval,
-            "theme": "dark",
-            "width": 800,
-            "height": 500,
-            "studies": ["RSI"]
+            "theme": "light",
+            "width": 600,
+            "height": 900,
+            "studies": [
+                {
+                    "name": "Relative Strength Index",
+                    "forceOverlay": False
+                }
+            ]
         }
         headers = {
             "authorization": f"Bearer {CHART_IMG_API_KEY}",
@@ -120,8 +125,8 @@ async def fetch_chart_image(symbol: str, timeframe: str):
             except Exception as e:
                 logging.error(f"Chart-Img fetch error: {e}")
 
-    # Fallback Image if API key is not set yet
-    fallback_url = f"https://quickchart.io/chart?bkg=%231e1e2f&c={{type:'line',data:{{labels:[1,2,3,4,5],datasets:[{{label:'{clean_symbol} ({timeframe})',data:[10,12,11,14,13],borderColor:'%2300ff7f'}}]}}}}"
+    # Fallback Image
+    fallback_url = f"https://quickchart.io/chart?bkg=white&c={{type:'line',data:{{labels:[1,2,3,4,5],datasets:[{{label:'{clean_symbol} ({timeframe})',data:[10,12,11,14,13],borderColor:'green'}}]}}}}"
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(fallback_url, timeout=5) as resp:
@@ -131,7 +136,7 @@ async def fetch_chart_image(symbol: str, timeframe: str):
             pass
     return None
 
-# AI Signal Generation with Retry Logic for 503 Errors
+# AI Signal Generation with Retry Logic
 async def generate_signal(symbol: str, timeframe: str):
     formatted_symbol, price, rsi, change_24h = await get_crypto_data(symbol, timeframe)
     if not price:
@@ -167,7 +172,6 @@ async def generate_signal(symbol: str, timeframe: str):
     🧩 تحلیل اکشن قیمت: [توضیح تحلیلی ۲ جمله‌ای]
     """
 
-    # Retry logic up to 3 times for 503 / busy model
     response_text = None
     for attempt in range(3):
         try:
