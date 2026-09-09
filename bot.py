@@ -25,7 +25,6 @@ if ADMIN_ID:
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
-# کلاینت جدید گوگل برای پشتیبانی از کلیدهای AQ...
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 user_ids = set()
@@ -108,7 +107,7 @@ async def generate_signal(user_input_symbol: str, timeframe="1h"):
     try:
         response = await asyncio.to_thread(
             ai_client.models.generate_content,
-            model="gemini-2.5-flash",
+            model="gemini-3.6-flash",
             contents=prompt
         )
         return response.text
@@ -186,7 +185,6 @@ async def broadcast_msg(message: types.Message):
                 pass
         await message.answer(f"✅ پیام به {count} کاربر ارسال شد.")
 
-# دریافت نام ارز و ارسال پاسخ فوری
 @dp.message(F.text)
 async def handle_symbol_input(message: types.Message):
     user_ids.add(message.from_user.id)
