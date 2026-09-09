@@ -6,7 +6,7 @@ import aiohttp
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from openai import AsyncOpenAI
+from google import genai
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
 
@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO)
 
 # Environment Variables
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_ID = os.getenv("ADMIN_ID")
 
 if ADMIN_ID:
@@ -24,10 +24,10 @@ if ADMIN_ID:
     except ValueError:
         logging.error("ADMIN_ID must be a numeric integer!")
 
-# Initialize Bot & OpenAI
+# Initialize Bot & Gemini AI
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
-openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Active users storage
 user_ids = set()
@@ -97,7 +97,7 @@ async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=100):
         logging.error(f"Error fetching CCXT data: {e}")
         return None, None, None, None
 
-# AI Signal Generation with OpenAI (gpt-4o-mini)
+# AI Signal Generation with Google Gemini 2.5
 async def generate_signal(symbol="ETH/USDT", timeframe="1h"):
     price, rsi, change_24h, closes = await get_crypto_data(symbol, timeframe)
     if not price:
@@ -134,14 +134,14 @@ async def generate_signal(symbol="ETH/USDT", timeframe="1h"):
     """
 
     try:
-        response = await openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7
+        response = await asyncio.to_thread(
+            ai_client.models.generate_content,
+            model="gemini-2.5-flash",
+            contents=prompt
         )
-        return response.choices[0].message.content
+        return response.text
     except Exception as e:
-        logging.error(f"OpenAI Error: {e}")
+        logging.error(f"Gemini Error: {e}")
         return f"⚠️ خطا در سرویس هوش مصنوعی: {e}"
 
 # Telegram Commands & Handlers
