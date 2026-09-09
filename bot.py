@@ -97,7 +97,7 @@ async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=100):
         logging.error(f"Error fetching CCXT data: {e}")
         return None, None, None, None
 
-# AI Signal Generation with Google Gemini 2.5
+# AI Signal Generation with Dynamic Gemini Model Selection
 async def generate_signal(symbol="ETH/USDT", timeframe="1h"):
     price, rsi, change_24h, closes = await get_crypto_data(symbol, timeframe)
     if not price:
@@ -134,9 +134,19 @@ async def generate_signal(symbol="ETH/USDT", timeframe="1h"):
     """
 
     try:
+        # لیست کردن مدل‌های فعال پشتیبانی‌کننده از تولید متن
+        models_list = list(ai_client.models.list())
+        available_models = [m.name for m in models_list if hasattr(m, 'supported_actions') and 'generateContent' in m.supported_actions]
+        
+        if not available_models:
+            available_models = [m.name for m in models_list]
+
+        # انتخاب اولین مدل فلش یا اولین مدل دسترسی‌پذیر
+        target_model = next((m for m in available_models if 'flash' in m), available_models[0])
+
         response = await asyncio.to_thread(
             ai_client.models.generate_content,
-            model="gemini-2.5-flash",
+            model=target_model,
             contents=prompt
         )
         return response.text
