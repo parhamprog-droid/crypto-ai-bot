@@ -135,13 +135,13 @@ async def generate_signal(symbol="ETH/USDT", timeframe="1h"):
 
     try:
         response = ai_client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-1.5-flash',
             contents=prompt
         )
         return response.text
     except Exception as e:
         logging.error(f"Gemini Error: {e}")
-        return "⚠️ خطا در پردازش هوش مصنوعی."
+        return f"⚠️ خطا در پردازش هوش مصنوعی: {e}"
 
 # Telegram Commands & Handlers
 @dp.message(Command("start"))
