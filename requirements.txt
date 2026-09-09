@@ -1,6 +1,5 @@
-aiogram
-google-genai
+aiogram>=3.0.0
 ccxt
 aiohttp
-python-dotenv
 apscheduler
+groq
