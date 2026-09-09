@@ -5,8 +5,8 @@ import ccxt.async_support as ccxt
 import aiohttp
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from google import genai
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+import google.generativeai as genai
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
 
@@ -24,10 +24,12 @@ if ADMIN_ID:
     except ValueError:
         logging.error("ADMIN_ID must be a numeric integer!")
 
-# Initialize Bot & Gemini AI Client
+# Initialize Bot & Gemini AI
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
-ai_client = genai.Client(api_key=GEMINI_API_KEY)
+
+# Configure Gemini
+genai.configure(api_key=GEMINI_API_KEY)
 
 # Active users storage
 user_ids = set()
@@ -35,45 +37,23 @@ user_ids = set()
 # Main Reply Keyboard
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="⚡️ دریافت سیگنال دستی"), KeyboardButton(text="📊 شاخص ترس و طمع")],
-        [KeyboardButton(text="🧮 محاسبه ریسک")]
+        [KeyboardButton(text="📊 شاخص ترس و طمع"), KeyboardButton(text="🧮 محاسبه ریسک")]
     ],
     resize_keyboard=True
 )
-
-# Function to generate Inline Keyboard for Timeframes & Ranges
-def get_timeframe_keyboard(symbol: str):
-    clean_symbol = symbol.replace("/", "").replace("USDT", "")
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="1m", callback_data=f"tf_1m_{clean_symbol}"),
-            InlineKeyboardButton(text="30m", callback_data=f"tf_30m_{clean_symbol}"),
-            InlineKeyboardButton(text="1h", callback_data=f"tf_1h_{clean_symbol}"),
-            InlineKeyboardButton(text="1day", callback_data=f"tf_1d_{clean_symbol}"),
-            InlineKeyboardButton(text="1week", callback_data=f"tf_1w_{clean_symbol}"),
-        ],
-        [
-            InlineKeyboardButton(text="1months", callback_data=f"tf_1M_{clean_symbol}"),
-            InlineKeyboardButton(text="6months", callback_data=f"tf_6M_{clean_symbol}"),
-            InlineKeyboardButton(text="1range", callback_data=f"rng_1_{clean_symbol}"),
-            InlineKeyboardButton(text="10ranges", callback_data=f"rng_10_{clean_symbol}"),
-            InlineKeyboardButton(text="100ranges", callback_data=f"rng_100_{clean_symbol}"),
-        ]
-    ])
 
 # Fetch Candle Data from KuCoin
 async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=100):
     exchange = ccxt.kucoin()
     try:
-        tf_map = {
-            "1m": "1m", "30m": "30m", "1h": "1h", 
-            "1d": "1day", "1w": "1week", "1M": "1month", "6M": "1month"
-        }
-        actual_tf = tf_map.get(timeframe, "1h")
-        if timeframe == "6M":
-            limit = 180
-            
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=actual_tf, limit=limit)
+        # Standardize symbol input
+        formatted_symbol = symbol.upper().strip()
+        if not formatted_symbol.endswith("/USDT") and not formatted_symbol.endswith("USDT"):
+            formatted_symbol = f"{formatted_symbol}/USDT"
+        elif formatted_symbol.endswith("USDT") and "/" not in formatted_symbol:
+            formatted_symbol = formatted_symbol.replace("USDT", "/USDT")
+
+        ohlcv = await exchange.fetch_ohlcv(formatted_symbol, timeframe=timeframe, limit=limit)
         await exchange.close()
         
         closes = [c[4] for c in ohlcv]
@@ -91,20 +71,20 @@ async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=100):
         rsi = 100 - (100 / (1 + rs))
         
         change_24h = ((current_price - closes[0]) / closes[0]) * 100
-        return current_price, rsi, change_24h, closes
+        return formatted_symbol, current_price, rsi, change_24h
     except Exception as e:
         await exchange.close()
         logging.error(f"Error fetching CCXT data: {e}")
         return None, None, None, None
 
-# AI Signal Generation with Gemini 3.6 Flash
-async def generate_signal(symbol="ETH/USDT", timeframe="1h"):
-    price, rsi, change_24h, closes = await get_crypto_data(symbol, timeframe)
+# AI Signal Generation
+async def generate_signal(user_input_symbol: str, timeframe="1h"):
+    symbol, price, rsi, change_24h = await get_crypto_data(user_input_symbol, timeframe)
     if not price:
-        return "⚠️ خطا در دریافت اطلاعات صرافی. لطفا مجددا تلاش کنید."
+        return f"⚠️ ارز **{user_input_symbol}** پیدا نشد یا در دریافت اطلاعات صرافی خطایی رخ داد. لطفاً نماد را درست وارد کنید (مثال: BTC یا ETH)."
 
     prompt = f"""
-    تو یک تحلیل‌گر تکنیکال ارشد کریپتو هستی. برای ارز {symbol} در تایم‌فریم/محدوده {timeframe} تحلیل بنویس.
+    تو یک تحلیل‌گر تکنیکال ارشد کریپتو هستی. برای ارز {symbol} در تایم‌فریم {timeframe} تحلیل بنویس.
     اطلاعات بازار:
     - قیمت کنونی: {price} USDT
     - شاخص RSI: {rsi:.2f}
@@ -134,11 +114,8 @@ async def generate_signal(symbol="ETH/USDT", timeframe="1h"):
     """
 
     try:
-        response = await asyncio.to_thread(
-            ai_client.models.generate_content,
-            model="gemini-3.6-flash",
-            contents=prompt
-        )
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = await asyncio.to_thread(model.generate_content, prompt)
         return response.text
     except Exception as e:
         logging.error(f"Gemini Error: {e}")
@@ -149,20 +126,11 @@ async def generate_signal(symbol="ETH/USDT", timeframe="1h"):
 async def start_cmd(message: types.Message):
     user_ids.add(message.from_user.id)
     await message.answer(
-        "👋 به **AlphaEngine Pro** خوش آمدید!\n"
-        "سیستم هوشمند آنالیز، مدیریت ریسک و سیگنال‌دهی کریپتو.",
+        "👋 به **AlphaEngine Pro** خوش آمدید!\n\n"
+        "برای دریافت تحلیل، فقط **نام ارز** را بفرستید (مثلاً: `BTC` یا `ETH` یا `SOL`).",
         reply_markup=main_keyboard,
         parse_mode="Markdown"
     )
-
-@dp.message(F.text == "⚡️ دریافت سیگنال دستی")
-async def manual_signal_btn(message: types.Message):
-    user_ids.add(message.from_user.id)
-    msg = await message.answer("🔄 در حال آنالیز مارکت و صدور سیگنال...")
-    signal_text = await generate_signal("ETH/USDT", "1h")
-    keyboard = get_timeframe_keyboard("ETH/USDT")
-    await msg.delete()
-    await message.answer(signal_text, reply_markup=keyboard)
 
 @dp.message(F.text == "📊 شاخص ترس و طمع")
 async def fear_and_greed_btn(message: types.Message):
@@ -224,34 +192,24 @@ async def broadcast_msg(message: types.Message):
                 pass
         await message.answer(f"✅ پیام به {count} کاربر ارسال شد.")
 
-# Callback Query Handler for Timeframe Buttons
-@dp.callback_query(lambda c: c.data.startswith(('tf_', 'rng_')))
-async def handle_timeframe_click(callback_query: types.CallbackQuery):
-    data_parts = callback_query.data.split('_')
-    tf_type = data_parts[0]
-    selected_tf = data_parts[1]
-    raw_symbol = data_parts[2] if len(data_parts) > 2 else "ETH"
-    symbol = f"{raw_symbol}/USDT"
-
-    display_label = f"{selected_tf} range" if tf_type == "rng" else selected_tf
-    await callback_query.answer(f"در حال تولید سیگنال برای {display_label}...")
-
-    new_signal = await generate_signal(symbol, display_label)
-    keyboard = get_timeframe_keyboard(symbol)
-
-    try:
-        await callback_query.message.edit_text(new_signal, reply_markup=keyboard)
-    except Exception:
-        await callback_query.message.answer(new_signal, reply_markup=keyboard)
+# Catch-all text handler for symbol input (e.g. BTC, ETH, SOL)
+@dp.message(F.text)
+async def handle_symbol_input(message: types.Message):
+    user_ids.add(message.from_user.id)
+    symbol_text = message.text.strip()
+    
+    msg = await message.answer(f"🔄 در حال دریافت اطلاعات و آنالیز **{symbol_text.upper()}**...")
+    signal_text = await generate_signal(symbol_text, "1h")
+    await msg.delete()
+    await message.answer(signal_text)
 
 # Background Jobs (Scheduler)
 async def auto_signal_job():
     if user_ids:
-        signal = await generate_signal("ETH/USDT", "1h")
-        keyboard = get_timeframe_keyboard("ETH/USDT")
+        signal = await generate_signal("ETH", "1h")
         for uid in user_ids:
             try:
-                await bot.send_message(uid, signal, reply_markup=keyboard)
+                await bot.send_message(uid, signal)
             except Exception:
                 pass
 
