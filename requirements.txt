@@ -4,6 +4,4 @@ ccxt
 aiohttp
 apscheduler
 matplotlib
-mplfinance
 pandas
-numpy
