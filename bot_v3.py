@@ -37,8 +37,8 @@ def get_user(user_id: int):
 
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="📊 شاخص ترس و طمع"), KeyboardButton(text="🧮 محاسبه ریسک")],
-        [KeyboardButton(text="📸 آنالیز عکس چارت (VIP)"), KeyboardButton(text="👤 حساب کاربری")]
+        [KeyboardButton(text="🚀 اسکنر ارزهای پامپی"), KeyboardButton(text="📊 شاخص ترس و طمع")],
+        [KeyboardButton(text="🧮 محاسبه ریسک"), KeyboardButton(text="👤 حساب کاربری")]
     ],
     resize_keyboard=True
 )
@@ -80,6 +80,31 @@ async def get_crypto_dataframe(symbol="BTC/USDT", timeframe="1h", limit=80):
         await exchange.close()
         logging.error(f"CCXT Error ({symbol}): {e}")
         return None, None
+
+# Pump Scanner Function
+async def scan_pump_candidates():
+    exchange = ccxt.coinex()
+    try:
+        tickers = await exchange.fetch_tickers()
+        await exchange.close()
+        
+        candidates = []
+        for symbol, data in tickers.items():
+            if symbol.endswith("/USDT") and data.get('quoteVolume') and data['quoteVolume'] > 100000:
+                change = data.get('percentage', 0)
+                if 5 <= change <= 30:  # Potential pump zone
+                    candidates.append({
+                        'symbol': symbol,
+                        'change': change,
+                        'volume': data['quoteVolume']
+                    })
+        
+        candidates = sorted(candidates, key=lambda x: x['change'], reverse=True)[:5]
+        return candidates
+    except Exception as e:
+        await exchange.close()
+        logging.error(f"Scanner Error: {e}")
+        return []
 
 def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
     clean_symbol = symbol.replace("/", "")
@@ -152,18 +177,12 @@ async def generate_signal(symbol: str, timeframe: str):
     - شاخص RSI: {rsi:.2f}
     - تغییرات 24 ساعت: {change_24h:.2f}%
 
-    قوانین مهم:
-    1. با توجه به RSI و قیمت، جهت پوزیشن (Long یا Short) را مشخص کن.
-    2. محدوده ورود (Entry Zone) را با یک بازه منطقی حول قیمت فعلی بده.
-    3. اهرم (Leverage) پیشنهادی را هوشمندانه انتخاب کن (برای بیت‌کوین/اتریوم 5x-10x و برای سایرین 2x-5x).
-    4. حد سودها (TP1, TP2, TP3) و حد ضرر (Stop Loss) با نسبت ریسک به ریوارد عالی باشد.
-
     خروجی را دقیقا با این فرمت ارسال کن:
     ⚡️ AlphaEngine Pro | #{formatted_symbol.replace('/', '')}
     ⏱ تایم‌فریم: {timeframe}
 
     🎯 ستاپ معاملاتی:
-    • جهش پیشنهادی: [Long 🟢 یا Short 🔴]
+    • جهت پیشنهادی: [Long 🟢 یا Short 🔴]
     • محدوده ورود (Entry Zone): [بازه قیمتی منطقی]
     • اهرم پیشنهادی (Leverage): [Cross 2x-5x یا 5x-10x]
 
@@ -204,9 +223,28 @@ async def start_cmd(message: types.Message):
     get_user(message.from_user.id)
     await message.answer(
         "👋 به **AlphaEngine Pro** خوش آمدید!\n\n"
-        "نام ارز مورد نظر خود را وارد کنید (مثلاً `BTC` یا `ETH`):",
+        "نام ارز مورد نظر خود را وارد کنید یا از دکمه‌های زیر استفاده کنید:",
         reply_markup=main_keyboard
     )
+
+@dp.message(F.text == "🚀 اسکنر ارزهای پامپی")
+async def pump_scanner_handler(message: types.Message):
+    msg = await message.answer("🔍 در حال اسکن بازار و شناسایی ارزهای مستعد پامپ...")
+    candidates = await scan_pump_candidates()
+    
+    if not candidates:
+        await msg.edit_text("⚠️ در حال حاضر ارز مشکوک به پامپ یافت نشد.")
+        return
+    
+    text = "🔥 **ارزهای مستعد پامپ و جهش حجم (۲۴ ساعت اخیر):**\n\n"
+    for c in candidates:
+        text += f"📌 **#{c['symbol'].replace('/', '')}**\n"
+        text += f"📈 رشد ۲۴ ساعت: `+{c['change']:.2f}%`\n"
+        text += f"📊 حجم معاملات: `${c['volume']:,.0f}`\n"
+        text += "──────────────\n"
+    
+    text += "\n💡 *برای دریافت تحلیل دقیق هر ارز، نام آن را ارسال کنید.*"
+    await msg.edit_text(text, parse_mode="Markdown")
 
 @dp.message(F.text == "📊 شاخص ترس و طمع")
 async def fear_and_greed(message: types.Message):
@@ -237,7 +275,7 @@ async def handle_timeframe_click(callback: types.CallbackQuery):
 @dp.message(F.text)
 async def handle_symbol_input(message: types.Message):
     symbol_text = message.text.strip().upper()
-    if symbol_text.startswith("/") or symbol_text in ["📊 شاخص ترس و طمع", "🧮 محاسبه ریسک", "📸 آنالیز عکس چارت (VIP)", "👤 حساب کاربری"]:
+    if symbol_text.startswith("/") or symbol_text in ["🚀 اسکنر ارزهای پامپی", "📊 شاخص ترس و طمع", "🧮 محاسبه ریسک", "👤 حساب کاربری"]:
         return
 
     await message.answer(
