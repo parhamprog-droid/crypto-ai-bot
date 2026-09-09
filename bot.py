@@ -6,16 +6,14 @@ import aiohttp
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from groq import Groq
+from google import genai
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
 
-# Logging configuration
 logging.basicConfig(level=logging.INFO)
 
-# Environment Variables
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_ID = os.getenv("ADMIN_ID")
 
 if ADMIN_ID:
@@ -24,15 +22,14 @@ if ADMIN_ID:
     except ValueError:
         logging.error("ADMIN_ID must be a numeric integer!")
 
-# Initialize Bot & Groq Client
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
-client = Groq(api_key=GROQ_API_KEY)
 
-# Active users storage
+# کلاینت جدید گوگل برای پشتیبانی از کلیدهای AQ...
+ai_client = genai.Client(api_key=GEMINI_API_KEY)
+
 user_ids = set()
 
-# Main Reply Keyboard
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📊 شاخص ترس و طمع"), KeyboardButton(text="🧮 محاسبه ریسک")]
@@ -40,7 +37,6 @@ main_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# Fetch Candle Data from KuCoin
 async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=100):
     exchange = ccxt.kucoin()
     try:
@@ -74,7 +70,6 @@ async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=100):
         logging.error(f"Error fetching CCXT data: {e}")
         return None, None, None, None
 
-# AI Signal Generation using Groq (llama-3.3-70b-versatile)
 async def generate_signal(user_input_symbol: str, timeframe="1h"):
     symbol, price, rsi, change_24h = await get_crypto_data(user_input_symbol, timeframe)
     if not price:
@@ -112,16 +107,15 @@ async def generate_signal(user_input_symbol: str, timeframe="1h"):
 
     try:
         response = await asyncio.to_thread(
-            client.chat.completions.create,
-            messages=[{"role": "user", "content": prompt}],
-            model="llama-3.3-70b-versatile"
+            ai_client.models.generate_content,
+            model="gemini-2.5-flash",
+            contents=prompt
         )
-        return response.choices[0].message.content
+        return response.text
     except Exception as e:
-        logging.error(f"Groq Error: {e}")
+        logging.error(f"Gemini Error: {e}")
         return f"⚠️ خطا در سرویس هوش مصنوعی: {e}"
 
-# Telegram Commands & Handlers
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     user_ids.add(message.from_user.id)
@@ -192,7 +186,7 @@ async def broadcast_msg(message: types.Message):
                 pass
         await message.answer(f"✅ پیام به {count} کاربر ارسال شد.")
 
-# Catch-all text handler for symbol input (e.g. BTC, ETH, SOL)
+# دریافت نام ارز و ارسال پاسخ فوری
 @dp.message(F.text)
 async def handle_symbol_input(message: types.Message):
     user_ids.add(message.from_user.id)
@@ -203,7 +197,6 @@ async def handle_symbol_input(message: types.Message):
     await msg.delete()
     await message.answer(signal_text)
 
-# Background Jobs (Scheduler)
 async def auto_signal_job():
     if user_ids:
         signal = await generate_signal("ETH", "1h")
@@ -213,7 +206,6 @@ async def auto_signal_job():
             except Exception:
                 pass
 
-# Aiohttp Web Server for Render
 async def handle_web(request):
     return web.Response(text="AlphaEngine Pro is Active!")
 
