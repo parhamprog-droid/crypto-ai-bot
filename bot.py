@@ -24,7 +24,7 @@ if ADMIN_ID:
     except ValueError:
         logging.error("ADMIN_ID must be a numeric integer!")
 
-# Initialize Bot & Gemini AI
+# Initialize Bot & Gemini Client (New SDK)
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
@@ -97,7 +97,7 @@ async def get_crypto_data(symbol="ETH/USDT", timeframe="1h", limit=100):
         logging.error(f"Error fetching CCXT data: {e}")
         return None, None, None, None
 
-# AI Signal Generation with Dynamic Gemini Model Selection
+# AI Signal Generation with updated Gemini 3.6 Flash
 async def generate_signal(symbol="ETH/USDT", timeframe="1h"):
     price, rsi, change_24h, closes = await get_crypto_data(symbol, timeframe)
     if not price:
@@ -134,19 +134,9 @@ async def generate_signal(symbol="ETH/USDT", timeframe="1h"):
     """
 
     try:
-        # لیست کردن مدل‌های فعال پشتیبانی‌کننده از تولید متن
-        models_list = list(ai_client.models.list())
-        available_models = [m.name for m in models_list if hasattr(m, 'supported_actions') and 'generateContent' in m.supported_actions]
-        
-        if not available_models:
-            available_models = [m.name for m in models_list]
-
-        # انتخاب اولین مدل فلش یا اولین مدل دسترسی‌پذیر
-        target_model = next((m for m in available_models if 'flash' in m), available_models[0])
-
         response = await asyncio.to_thread(
             ai_client.models.generate_content,
-            model=target_model,
+            model="gemini-3.6-flash",
             contents=prompt
         )
         return response.text
