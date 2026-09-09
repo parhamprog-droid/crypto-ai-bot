@@ -106,97 +106,67 @@ async def scan_pump_candidates():
         logging.error(f"Scanner Error: {e}")
         return []
 
-# تابع بهینه‌شده و ۱۰۰٪ مقاوم در برابر Timeout و Error
+# تابع دریافت توکن‌های ترند DEX از طریق GeckoTerminal API (کاملا پایدار و بدون بلاک)
 async def fetch_dex_tokens():
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        'Accept': 'application/json;version=20230203',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
     }
-    chain_map = {
+    chain_names = {
         "solana": "SOLANA",
-        "ethereum": "ETHEREUM",
+        "eth": "ETHEREUM",
         "bsc": "BINANCE SMART CHAIN",
         "base": "BASE",
         "arbitrum": "ARBITRUM",
-        "polygon": "POLYGON",
-        "avalanche": "AVALANCHE",
+        "polygon_pos": "POLYGON",
+        "avax": "AVALANCHE",
         "sui": "SUI",
         "ton": "TON"
     }
     
+    url = "https://api.geckoterminal.com/api/v2/networks/trending_pools?page=1"
+    
     async with aiohttp.ClientSession(headers=headers) as session:
         try:
-            # step 1: دریافت لیست ترندها
-            async with session.get("https://api.dexscreener.com/token-boosts/top/v1", timeout=8) as resp:
-                if resp.status != 200:
-                    return []
-                boosts_data = await resp.json()
-            
-            addresses = []
-            for item in boosts_data:
-                addr = item.get("tokenAddress")
-                if addr and addr not in addresses:
-                    addresses.append(addr)
-                if len(addresses) >= 15:
-                    break
+            async with session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    pools = data.get("data", [])
+                    filtered = []
+                    seen_symbols = set()
                     
-            if not addresses:
-                return []
-
-            # step 2: استعلام دسته‌جمعی (یک درخواست به جای چندین درخواست)
-            addrs_str = ",".join(addresses)
-            pair_url = f"https://api.dexscreener.com/latest/dex/tokens/{addrs_str}"
-            
-            async with session.get(pair_url, timeout=8) as p_resp:
-                if p_resp.status != 200:
-                    return []
-                p_data = await p_resp.json()
-                pairs = p_data.get("pairs", [])
-                
-                if not pairs:
-                    return []
-
-                # گروه بندی بر اساس توکن پایه
-                token_groups = {}
-                for pair in pairs:
-                    base_addr = pair.get("baseToken", {}).get("address")
-                    if base_addr:
-                        if base_addr not in token_groups:
-                            token_groups[base_addr] = []
-                        token_groups[base_addr].append(pair)
-
-                filtered = []
-                seen_symbols = set()
-
-                for addr, pair_list in token_groups.items():
-                    # انتخاب استخر با بالاترین نقدینگی
-                    best_pair = max(pair_list, key=lambda x: float(x.get("liquidity", {}).get("usd", 0) or 0))
-                    
-                    token_symbol = best_pair.get("baseToken", {}).get("symbol", "N/A")
-                    token_name = best_pair.get("baseToken", {}).get("name", "N/A")
-                    price = best_pair.get("priceUsd", "0")
-                    liquidity = float(best_pair.get("liquidity", {}).get("usd", 0) or 0)
-                    
-                    raw_chain = str(best_pair.get("chainId", "N/A")).lower()
-                    chain_name = chain_map.get(raw_chain, raw_chain.upper())
-
-                    if liquidity > 5000 and token_symbol not in seen_symbols:
-                        seen_symbols.add(token_symbol)
-                        filtered.append({
-                            "symbol": token_symbol,
-                            "name": token_name,
-                            "price": price,
-                            "liquidity": liquidity,
-                            "chain": chain_name
-                        })
-                    
-                    if len(filtered) >= 5:
-                        break
-
-                return filtered
-
+                    for pool in pools:
+                        attr = pool.get("attributes", {})
+                        rel = pool.get("relationships", {})
+                        
+                        raw_name = attr.get("name", "N/A")
+                        # استخراج نماد توکن از نام استخر (مثلا ABC/SOL)
+                        token_symbol = raw_name.split("/")[0].strip() if "/" in raw_name else raw_name
+                        
+                        price = attr.get("base_token_price_usd") or "0"
+                        liquidity = float(attr.get("reserve_in_usd") or 0)
+                        
+                        network_id = rel.get("network", {}).get("data", {}).get("id", "N/A")
+                        chain_display = chain_names.get(network_id, network_id.upper())
+                        
+                        if liquidity > 5000 and token_symbol not in seen_symbols:
+                            seen_symbols.add(token_symbol)
+                            filtered.append({
+                                "symbol": token_symbol,
+                                "name": token_symbol,
+                                "price": price,
+                                "liquidity": liquidity,
+                                "chain": chain_display
+                            })
+                            
+                        if len(filtered) >= 5:
+                            break
+                            
+                    return filtered
         except Exception as e:
-            logging.error(f"DEX Fetch Error: {e}")
+            logging.error(f"GeckoTerminal Fetch Error: {e}")
             return []
+    return []
 
 def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
     clean_symbol = symbol.replace("/", "")
@@ -349,7 +319,7 @@ async def dex_radar_handler(message: types.Message):
     
     text = "🐳 **توکن‌های ترند و پرنقدینگی On-Chain (شناسایی‌شده):**\n\n"
     for t in tokens:
-        text += f"🪙 **{t['name']} ({t['symbol']})**\n"
+        text += f"🪙 **{t['symbol']}**\n"
         text += f"🌐 شبکه: `{t['chain']}`\n"
         text += f"💵 قیمت: `${float(t['price']):.6f}`\n"
         text += f"💧 نقدینگی استخر: `${float(t['liquidity']):,.0f}`\n"
