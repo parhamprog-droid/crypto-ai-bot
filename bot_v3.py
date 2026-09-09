@@ -53,7 +53,6 @@ def timeframe_keyboard(symbol: str):
         ]
     ])
 
-# Fetch Candle Data using CoinEx (No US IP Restrictions)
 async def get_crypto_dataframe(symbol="BTC/USDT", timeframe="1h", limit=80):
     exchange = ccxt.coinex()
     try:
@@ -90,8 +89,6 @@ def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> byte
     ax_rsi.set_facecolor('#ffffff')
 
     n = len(df)
-    
-    # Render Candlesticks
     for i in range(n):
         open_p = df['Open'].iloc[i]
         close_p = df['Close'].iloc[i]
@@ -117,7 +114,7 @@ def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> byte
     ax_main.text(n-1, last_price, f" {last_price:.4f}", color='white', backgroundcolor='red', fontsize=8, fontweight='bold', va='center')
 
     ax_main.grid(True, linestyle='--', alpha=0.5, color='#e0e0e0')
-    ax_main.set_title(f"{clean_symbol} {timeframe} - Start using Turbo Trade Bot today : @tbsignalbot", fontsize=12, fontweight='bold', pad=10, color='#222222')
+    ax_main.set_title(f"{clean_symbol} {timeframe} - AlphaEngine Pro", fontsize=12, fontweight='bold', pad=10, color='#222222')
     ax_main.yaxis.tick_right()
 
     ax_rsi.plot(range(n), df['RSI'], color='#8a2be2', linewidth=1.2)
@@ -126,7 +123,7 @@ def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> byte
     ax_rsi.fill_between(range(n), 30, 70, color='#e6e6fa', alpha=0.4)
     ax_rsi.set_ylim(0, 100)
     ax_rsi.grid(True, linestyle='--', alpha=0.5, color='#e0e0e0')
-    ax_rsi.set_title("RSI @tbsignalbot", fontsize=10, fontweight='bold', pad=5, color='#333333')
+    ax_rsi.set_title("RSI Indicator", fontsize=10, fontweight='bold', pad=5, color='#333333')
     ax_rsi.yaxis.tick_right()
 
     plt.tight_layout()
@@ -143,36 +140,43 @@ async def generate_signal(symbol: str, timeframe: str):
 
     price = df['Close'].iloc[-1]
     rsi = df['RSI'].iloc[-1]
+    high_24h = df['High'].max()
+    low_24h = df['Low'].min()
     change_24h = ((price - df['Close'].iloc[0]) / df['Close'].iloc[0]) * 100
 
     prompt = f"""
-    تو یک تحلیل‌گر تکنیکال ارشد کریپتو هستی. برای ارز {formatted_symbol} در تایم‌فریم {timeframe} تحلیل بنویس.
-    اطلاعات بازار:
-    - قیمت کنونی: {price} USDT
+    تو یک سیستم معاملاتی هوشمند کریپتو هستی. برای ارز {formatted_symbol} در تایم‌فریم {timeframe} ستاپ دقیق بنویس.
+    داده‌های مارکت:
+    - قیمت فعلی: {price} USDT
+    - بالاترین قیمت: {high_24h} | پایین‌ترین قیمت: {low_24h}
     - شاخص RSI: {rsi:.2f}
-    - تغییرات: {change_24h:.2f}%
+    - تغییرات 24 ساعت: {change_24h:.2f}%
 
-    خروجی را دقیقا با همین فرمت فاقد متن اضافی بفرست:
+    قوانین مهم:
+    1. با توجه به RSI و قیمت، جهت پوزیشن (Long یا Short) را مشخص کن.
+    2. محدوده ورود (Entry Zone) را با یک بازه منطقی حول قیمت فعلی بده.
+    3. اهرم (Leverage) پیشنهادی را هوشمندانه انتخاب کن (برای بیت‌کوین/اتریوم 5x-10x و برای سایرین 2x-5x).
+    4. حد سودها (TP1, TP2, TP3) و حد ضرر (Stop Loss) با نسبت ریسک به ریوارد عالی باشد.
+
+    خروجی را دقیقا با این فرمت ارسال کن:
     ⚡️ AlphaEngine Pro | #{formatted_symbol.replace('/', '')}
-    ⏱ زمان: 2026-09-09 | تایم‌فریم: {timeframe}
-    📌 تحلیل روند: [Long 🟢 یا Short 🔴]
-    📊 شاخص RSI: {rsi:.2f} | تغییرات: {change_24h:.2f}%
-    💵 قیمت مارکت: {price} USDT
+    ⏱ تایم‌فریم: {timeframe}
 
-    🎯 ستاپ معاملاتی
-    • موقعیت: [Long 🟢 یا Short 🔴]
-    • نقطه ورود: {price}
-    • پله پشتیبان: [عدد منطقی]
+    🎯 ستاپ معاملاتی:
+    • جهش پیشنهادی: [Long 🟢 یا Short 🔴]
+    • محدوده ورود (Entry Zone): [بازه قیمتی منطقی]
+    • اهرم پیشنهادی (Leverage): [Cross 2x-5x یا 5x-10x]
 
-    🚀 اهداف سودآوری (Take Profit)
+    🚀 اهداف سودآوری (Targets):
     ▫️ TP1: [عدد]
     ▫️ TP2: [عدد]
     ▫️ TP3: [عدد]
 
     🛑 حد ضرر (Stop Loss): [عدد]
-    ⚖️ ریسک به ریوارد: 1:2.2 | اهرم: Cross 3x-5x
+    ⚖️ ریسک به ریوارد: [مثلا 1:2.5]
 
-    🧩 تحلیل اکشن قیمت: [توضیح تحلیلی ۲ جمله‌ای]
+    📊 تحلیل تکنیکال خلاصه:
+    [۲ جمله کوتاه و تحلیلی از وضعیت قیمت و RSI]
     """
 
     response_text = None
@@ -190,7 +194,7 @@ async def generate_signal(symbol: str, timeframe: str):
             if attempt < 2:
                 await asyncio.sleep(2)
             else:
-                return "⚠️ سرور هوش مصنوعی در حال حاضر شلوغ است. لطفاً چند ثانیه دیگر مجدداً سعی کنید.", None
+                return "⚠️ سرور هوش مصنوعی شلوغ است. مجدداً تلاش کنید.", None
 
     chart_bytes = await asyncio.to_thread(generate_custom_chart, df, formatted_symbol, timeframe)
     return response_text, chart_bytes
@@ -200,7 +204,7 @@ async def start_cmd(message: types.Message):
     get_user(message.from_user.id)
     await message.answer(
         "👋 به **AlphaEngine Pro** خوش آمدید!\n\n"
-        "برای دریافت تحلیل و چارت اختصاصی، نام ارز را بفرستید (مثلاً `BTC` یا `ETH`).",
+        "نام ارز مورد نظر خود را وارد کنید (مثلاً `BTC` یا `ETH`):",
         reply_markup=main_keyboard
     )
 
@@ -219,7 +223,7 @@ async def fear_and_greed(message: types.Message):
 async def handle_timeframe_click(callback: types.CallbackQuery):
     await callback.answer()
     _, symbol, tf = callback.data.split(":")
-    await callback.message.edit_text(f"🔄 در حال دریافت چارت و سیگنال **{symbol}**...")
+    await callback.message.edit_text(f"🔄 در حال محاسبه ستاپ هوشمند و چارت **{symbol}**...")
     
     signal_text, chart_bytes = await generate_signal(symbol, tf)
     await callback.message.delete()
@@ -250,7 +254,8 @@ app.router.add_get('/', handle_web)
 async def main():
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 8080)))
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     
     await dp.start_polling(bot)
