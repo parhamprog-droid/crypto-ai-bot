@@ -106,46 +106,54 @@ async def scan_pump_candidates():
         logging.error(f"Scanner Error: {e}")
         return []
 
+# تابع اصلاح‌شده و ایمن دریافت توکن‌های ترند DEX
 async def fetch_dex_tokens():
-    async with aiohttp.ClientSession() as session:
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    async with aiohttp.ClientSession(headers=headers) as session:
         try:
-            async with session.get("https://api.dexscreener.com/token-boosts/top/v1") as resp:
+            async with session.get("https://api.dexscreener.com/token-boosts/top/v1", timeout=10) as resp:
                 if resp.status == 200:
-                    data = await resp.json()
-                    filtered = []
-                    seen_symbols = set()
+                    boosts_data = await resp.json()
+                    addresses = [item.get("tokenAddress") for item in boosts_data if item.get("tokenAddress")][:10]
                     
-                    for item in data:
-                        token_address = item.get("tokenAddress")
-                        if token_address:
-                            pair_url = f"https://api.dexscreener.com/latest/dex/tokens/{token_address}"
-                            async with session.get(pair_url) as p_resp:
-                                if p_resp.status == 200:
-                                    p_data = await p_resp.json()
-                                    pairs = p_data.get("pairs", [])
-                                    if pairs:
-                                        best_pair = pairs[0]
-                                        token_symbol = best_pair.get("baseToken", {}).get("symbol", "N/A")
-                                        token_name = best_pair.get("baseToken", {}).get("name", "N/A")
-                                        price = best_pair.get("priceUsd", "0")
-                                        liquidity = best_pair.get("liquidity", {}).get("usd", 0)
-                                        chain = best_pair.get("chainId", "N/A")
-                                        
-                                        if token_symbol not in seen_symbols and liquidity > 20000:
-                                            seen_symbols.add(token_symbol)
-                                            filtered.append({
-                                                "symbol": token_symbol,
-                                                "name": token_name,
-                                                "price": price,
-                                                "liquidity": liquidity,
-                                                "chain": chain
-                                            })
-                        if len(filtered) >= 5:
-                            break
-                    return filtered
+                    if not addresses:
+                        return []
+
+                    # استعلام دسته‌جمعی جهت جلوگیری از خطای Timeout
+                    addrs_str = ",".join(addresses)
+                    pair_url = f"https://api.dexscreener.com/latest/dex/tokens/{addrs_str}"
+                    
+                    async with session.get(pair_url, timeout=10) as p_resp:
+                        if p_resp.status == 200:
+                            p_data = await p_resp.json()
+                            pairs = p_data.get("pairs", [])
+                            
+                            filtered = []
+                            seen_symbols = set()
+                            
+                            for pair in pairs:
+                                token_symbol = pair.get("baseToken", {}).get("symbol", "N/A")
+                                token_name = pair.get("baseToken", {}).get("name", "N/A")
+                                price = pair.get("priceUsd", "0")
+                                liquidity = pair.get("liquidity", {}).get("usd", 0)
+                                chain_id = pair.get("chainId", "N/A") # استخراج دقیق نام شبکه
+                                
+                                if token_symbol not in seen_symbols and float(liquidity) > 10000:
+                                    seen_symbols.add(token_symbol)
+                                    filtered.append({
+                                        "symbol": token_symbol,
+                                        "name": token_name,
+                                        "price": price,
+                                        "liquidity": liquidity,
+                                        "chain": chain_id
+                                    })
+                                    if len(filtered) >= 5:
+                                        break
+                            return filtered
         except Exception as e:
             logging.error(f"DEX Fetch Error: {e}")
             return []
+    return []
 
 def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
     clean_symbol = symbol.replace("/", "")
@@ -301,7 +309,7 @@ async def dex_radar_handler(message: types.Message):
         text += f"🪙 **{t['name']} ({t['symbol']})**\n"
         text += f"🌐 شبکه: `{t['chain'].upper()}`\n"
         text += f"💵 قیمت: `${float(t['price']):.6f}`\n"
-        text += f"💧 نقدینگی استخر: `${t['liquidity']:,.0f}`\n"
+        text += f"💧 نقدینگی استخر: `${float(t['liquidity']):,.0f}`\n"
         text += "──────────────\n"
     
     text += "\n⚠️ *توجه: معامله توکن‌های DEX ریسک بالا دارد. حتماً حد ضرر را رعایت کنید.*"
