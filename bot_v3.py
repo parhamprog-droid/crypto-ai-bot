@@ -53,9 +53,9 @@ def timeframe_keyboard(symbol: str):
         ]
     ])
 
-# Fetch Candle Data from Binance (Extremely Reliable)
-async def get_crypto_dataframe(symbol="ETH/USDT", timeframe="1h", limit=80):
-    exchange = ccxt.binance()
+# Fetch Candle Data using CoinEx (No US IP Restrictions)
+async def get_crypto_dataframe(symbol="BTC/USDT", timeframe="1h", limit=80):
+    exchange = ccxt.coinex()
     try:
         formatted_symbol = symbol.upper().strip()
         if not formatted_symbol.endswith("/USDT") and not formatted_symbol.endswith("USDT"):
@@ -79,7 +79,7 @@ async def get_crypto_dataframe(symbol="ETH/USDT", timeframe="1h", limit=80):
         return formatted_symbol, df
     except Exception as e:
         await exchange.close()
-        logging.error(f"CCXT Error: {e}")
+        logging.error(f"CCXT Error ({symbol}): {e}")
         return None, None
 
 def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
@@ -91,7 +91,7 @@ def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> byte
 
     n = len(df)
     
-    # Custom Candlestick rendering
+    # Render Candlesticks
     for i in range(n):
         open_p = df['Open'].iloc[i]
         close_p = df['Close'].iloc[i]
@@ -103,29 +103,23 @@ def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> byte
         ax_main.plot([i, i], [low_p, high_p], color=color, linewidth=1)
         ax_main.bar(i, abs(close_p - open_p), bottom=min(open_p, close_p), color=color, width=0.6)
 
-    # Key Levels & Lines
     recent_high = df['High'].iloc[-30:].max()
     recent_low = df['Low'].iloc[-30:].min()
     last_price = df['Close'].iloc[-1]
 
-    # Upper/Lower Channel Lines
     ax_main.plot([0, n-1], [df['High'].iloc[0], recent_high], color='#8b0000', linestyle='-', linewidth=1, alpha=0.7)
     ax_main.plot([0, n-1], [df['Low'].iloc[0], recent_low], color='#006400', linestyle='-', linewidth=1, alpha=0.7)
     
-    # Support Box (Hatch Area)
     support_box_bottom = recent_low * 0.995
     ax_main.axhspan(support_box_bottom, recent_low, facecolor='#ffcccc', edgecolor='red', hatch='//', alpha=0.4)
     
-    # Current Price Horizontal
     ax_main.axhline(y=last_price, color='red', linestyle='--', linewidth=1)
     ax_main.text(n-1, last_price, f" {last_price:.4f}", color='white', backgroundcolor='red', fontsize=8, fontweight='bold', va='center')
 
-    # Grid & Titles
     ax_main.grid(True, linestyle='--', alpha=0.5, color='#e0e0e0')
     ax_main.set_title(f"{clean_symbol} {timeframe} - Start using Turbo Trade Bot today : @tbsignalbot", fontsize=12, fontweight='bold', pad=10, color='#222222')
     ax_main.yaxis.tick_right()
 
-    # RSI Plot
     ax_rsi.plot(range(n), df['RSI'], color='#8a2be2', linewidth=1.2)
     ax_rsi.axhline(70, color='gray', linestyle='--', linewidth=0.8)
     ax_rsi.axhline(30, color='gray', linestyle='--', linewidth=0.8)
@@ -223,7 +217,7 @@ async def fear_and_greed(message: types.Message):
 
 @dp.callback_query(F.data.startswith("tf:"))
 async def handle_timeframe_click(callback: types.CallbackQuery):
-    await callback.answer()  # پاسخ آنی به تلگرام جهت جلوگیری از اکسپایر شدن دکمه
+    await callback.answer()
     _, symbol, tf = callback.data.split(":")
     await callback.message.edit_text(f"🔄 در حال دریافت چارت و سیگنال **{symbol}**...")
     
