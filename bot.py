@@ -135,7 +135,7 @@ async def generate_signal(symbol="ETH/USDT", timeframe="1h"):
 
     try:
         response = ai_client.models.generate_content(
-            model='gemini-1.5-flash',
+            model='gemini-2.0-flash',
             contents=prompt
         )
         return response.text
