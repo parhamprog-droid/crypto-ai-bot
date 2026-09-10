@@ -47,7 +47,7 @@ def get_user(user_id: int):
         }
     return user_data[user_id]
 
-# --- تابع فراخوانی جمینای با اولویت Gemini 3.5 ---
+# --- تابع فراخوانی جمینای با اولویت Gemini 3.5 و سیستم هوشمند Fallback ---
 
 async def query_gemini(prompt: str) -> str:
     # لیست ترجیحی مدل‌ها با اولویت Gemini 3.5
@@ -71,7 +71,7 @@ async def query_gemini(prompt: str) -> str:
     except Exception as e:
         logging.warning(f"Could not fetch dynamic models list: {e}")
 
-    # ترکیب مدل‌های ترجیحی و پویا با حفظ اولویت Gemini 3.5
+    # ترکیب مدل‌های ترجیحی و پویا با حفظ اولویت
     candidate_models = list(dict.fromkeys(preferred_models + dynamic_models))
 
     last_error = None
@@ -445,9 +445,12 @@ async def crypto_news_handler(message: types.Message):
     prompt = f"این اخبار کریپتو را خوانده و خلاصه تحلیلی به فارسی ارائه بده:\n{raw_news}"
     try:
         response_text = await query_gemini(prompt)
-        await msg.edit_text(f"📰 **خلاصه اخبار و احساسات بازار:**\n\n{response_text}", parse_mode="Markdown")
+        try:
+            await msg.edit_text(f"📰 **خلاصه اخبار و احساسات بازار:**\n\n{response_text}", parse_mode="Markdown")
+        except Exception:
+            await msg.edit_text(f"📰 خلاصه اخبار و احساسات بازار:\n\n{response_text}")
     except Exception as e:
-        await msg.edit_text(f"⚠️ خطایی در تحلیل اخبار رخ داد:\n`{e}`", parse_mode="Markdown")
+        await msg.edit_text(f"⚠️ خطایی در تحلیل اخبار رخ داد:\n`{e}`")
 
 @dp.message(F.text == "🔔 هشدار قیمت")
 async def start_price_alert(message: types.Message):
@@ -531,26 +534,45 @@ async def user_profile(message: types.Message):
     status_text = "💎 VIP" if user["is_vip"] else "👤 رایگان"
     await message.answer(f"👤 **پروفایل کاربری:**\n\n🆔 آیدی: `{message.from_user.id}`\n👑 وضعیت: {status_text}", parse_mode="Markdown")
 
+# --- هاندلر کاملاً اصلاح شده انتخاب تایم‌فریم ---
+
 @dp.callback_query(F.data.startswith("tf:"))
 async def handle_timeframe_click(callback: types.CallbackQuery):
     await callback.answer()
     _, symbol, tf = callback.data.split(":")
     
-    loading_msg = await callback.message.edit_text(f"🔄 در حال پردازش موتور شش‌گانه و تحلیل **{symbol}**...")
+    loading_msg = await callback.message.answer(f"🔄 در حال پردازش موتور شش‌گانه و تحلیل **{symbol}**...")
     
     try:
         signal_text, chart_bytes = await generate_signal(symbol, tf)
         
-        if chart_bytes:
+        # ۱. پاک کردن امن پیام لودینگ
+        try:
             await loading_msg.delete()
+        except Exception:
+            pass
+
+        # ۲. ارسال عکس چارت به صورت جداگانه (ارسال بدون کاپشن سنگین جهت جلوگیری از لیمیت ۱۰۲۴ کاراکتر تلگرام)
+        if chart_bytes:
             photo_file = BufferedInputFile(chart_bytes, filename=f"{symbol}.png")
-            await callback.message.answer_photo(photo=photo_file, caption=signal_text)
-        else:
-            await loading_msg.edit_text(signal_text, parse_mode="Markdown")
+            try:
+                await callback.message.answer_photo(photo=photo_file, caption=f"📊 **چارت {symbol} ({tf})**", parse_mode="Markdown")
+            except Exception:
+                await callback.message.answer_photo(photo=photo_file, caption=f"📊 چارت {symbol} ({tf})")
+
+        # ۳. ارسال متن تحلیل به صورت پیام مجزا همراه با سیستم ضد کرش Markdown
+        if signal_text:
+            try:
+                await callback.message.answer(signal_text, parse_mode="Markdown")
+            except Exception:
+                await callback.message.answer(signal_text)
             
     except Exception as e:
         logging.error(f"Callback Error: {e}")
-        await loading_msg.edit_text(f"⚠️ خطایی در اجرای تحلیل رخ داد:\n`{e}`", parse_mode="Markdown")
+        try:
+            await loading_msg.edit_text(f"⚠️ خطایی در اجرای تحلیل رخ داد:\n`{e}`", parse_mode="Markdown")
+        except Exception:
+            await callback.message.answer(f"⚠️ خطایی در اجرای تحلیل رخ داد:\n{e}")
 
 @dp.message(F.text)
 async def handle_text_input(message: types.Message):
