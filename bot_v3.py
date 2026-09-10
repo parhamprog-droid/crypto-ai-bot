@@ -47,20 +47,32 @@ def get_user(user_id: int):
         }
     return user_data[user_id]
 
-# --- تابع هوشمند فراخوانی جمینای (پشتیبانی از چند مدل برای جلوگیری از ارور 404) ---
+# --- تابع هوشمند تشخیص خودکار و فراخوانی مدل جمینای ---
 
 async def query_gemini(prompt: str) -> str:
-    models_to_try = [
-        "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash-latest",
-        "gemini-1.5-pro-latest",
+    # 1. دریافت لیست تمام مدل‌های فعال روی این API Key
+    dynamic_models = []
+    try:
+        models_list = await asyncio.to_thread(genai.list_models)
+        for m in models_list:
+            if 'generateContent' in m.supported_generation_methods:
+                dynamic_models.append(m.name)
+    except Exception as e:
+        logging.warning(f"Could not fetch dynamic models list: {e}")
+
+    # 2. لیست رزرو در صورت عدم دریافت لیست پویا
+    fallback_models = [
         "gemini-1.5-flash",
-        "gemini-1.5-pro"
+        "gemini-1.5-pro",
+        "gemini-2.0-flash",
+        "gemini-pro"
     ]
-    
+
+    # ترکیب و حذف تکراری‌ها
+    candidate_models = list(dict.fromkeys(dynamic_models + fallback_models))
+
     last_error = None
-    for model_name in models_to_try:
+    for model_name in candidate_models:
         try:
             model = genai.GenerativeModel(model_name)
             response = await asyncio.to_thread(model.generate_content, prompt)
@@ -68,10 +80,10 @@ async def query_gemini(prompt: str) -> str:
                 return response.text
         except Exception as e:
             last_error = e
-            logging.warning(f"Model {model_name} failed, trying next... Error: {e}")
+            logging.warning(f"Model {model_name} failed: {e}")
             continue
-            
-    raise last_error or Exception("هیچ‌کدام از مدل‌های جمینای پاسخ ندادند. کلید API خود را بررسی کنید.")
+
+    raise last_error or Exception("هیچ‌کدام از مدل‌های جمینای پاسخ ندادند. کلید API خود را در گوگل استودیو بررسی کنید.")
 
 # --- کیبوردهای ربات ---
 
