@@ -17,7 +17,7 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     BufferedInputFile
 )
-from google import genai
+import google.generativeai as genai
 from aiohttp import web
 
 logging.basicConfig(level=logging.INFO)
@@ -26,12 +26,12 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "8800494482"))
 
-# تنظیم قدرتمندترین مدل جمینای برای تحلیل عمیق
-GEMINI_MODEL = "gemini-1.5-pro"
+# تنظیم کلید و دقیق‌ترین مدل جمینای
+genai.configure(api_key=GEMINI_API_KEY)
+gemini_model = genai.GenerativeModel("gemini-1.5-pro")
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
-ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 user_data = {}
 price_alerts = []
@@ -85,7 +85,6 @@ def buy_vip_keyboard():
 # --- توابع محاسباتی و داده‌های پیشرفته ---
 
 async def detect_whale_traps_and_stress_test(symbol: str, df: pd.DataFrame, orderbook_data: dict):
-    """موتور اختصاصی تشخیص تله‌های نهنگ و استرس‌تست"""
     volatility = df['Close'].pct_change().std() * 100
     
     if "BTC" in symbol.upper():
@@ -95,7 +94,6 @@ async def detect_whale_traps_and_stress_test(symbol: str, df: pd.DataFrame, orde
     
     ratio = orderbook_data.get('ratio', 1.0)
     spoofing_risk = "ریسک بالا ⚠️ (احتمال وجود دیوارهای فیک)" if ratio > 2.2 or ratio < 0.4 else "طبیعی 🟢"
-    
     liquidity_hunt_price = df['Low'].iloc[-10:].min()
     
     return {
@@ -376,14 +374,13 @@ async def generate_signal(symbol: str, timeframe: str):
 
     try:
         response = await asyncio.to_thread(
-            ai_client.models.generate_content,
-            model=GEMINI_MODEL,
-            contents=prompt
+            gemini_model.generate_content,
+            prompt
         )
         response_text = response.text
     except Exception as e:
         logging.error(f"Gemini Error: {e}")
-        return "⚠️ سرور هوش مصنوعی پاسخ نداد.", None
+        return f"⚠️ خطایی در دریافت تحلیل از جمینای رخ داد:\n`{e}`", None
 
     chart_bytes = await asyncio.to_thread(generate_custom_chart, df, formatted_symbol, timeframe)
     return response_text, chart_bytes
@@ -411,13 +408,12 @@ async def crypto_news_handler(message: types.Message):
     prompt = f"این اخبار کریپتو را خوانده و خلاصه تحلیلی به فارسی ارائه بده:\n{raw_news}"
     try:
         response = await asyncio.to_thread(
-            ai_client.models.generate_content, 
-            model=GEMINI_MODEL, 
-            contents=prompt
+            gemini_model.generate_content, 
+            prompt
         )
         await msg.edit_text(f"📰 **خلاصه اخبار و احساسات بازار:**\n\n{response.text}", parse_mode="Markdown")
-    except Exception:
-        await msg.edit_text("⚠️ خطایی در تحلیل اخبار رخ داد.")
+    except Exception as e:
+        await msg.edit_text(f"⚠️ خطایی در تحلیل اخبار رخ داد:\n`{e}`", parse_mode="Markdown")
 
 @dp.message(F.text == "🔔 هشدار قیمت")
 async def start_price_alert(message: types.Message):
@@ -505,13 +501,22 @@ async def user_profile(message: types.Message):
 async def handle_timeframe_click(callback: types.CallbackQuery):
     await callback.answer()
     _, symbol, tf = callback.data.split(":")
-    await callback.message.edit_text(f"🔄 در حال پردازش موتور شش‌گانه و تحلیل **{symbol}**...")
-    signal_text, chart_bytes = await generate_signal(symbol, tf)
-    await callback.message.delete()
-
-    if chart_bytes:
-        photo_file = BufferedInputFile(chart_bytes, filename=f"{symbol}.png")
-        await callback.message.answer_photo(photo=photo_file, caption=signal_text)
+    
+    loading_msg = await callback.message.edit_text(f"🔄 در حال پردازش موتور شش‌گانه و تحلیل **{symbol}**...")
+    
+    try:
+        signal_text, chart_bytes = await generate_signal(symbol, tf)
+        
+        if chart_bytes:
+            await loading_msg.delete()
+            photo_file = BufferedInputFile(chart_bytes, filename=f"{symbol}.png")
+            await callback.message.answer_photo(photo=photo_file, caption=signal_text)
+        else:
+            await loading_msg.edit_text(signal_text, parse_mode="Markdown")
+            
+    except Exception as e:
+        logging.error(f"Callback Error: {e}")
+        await loading_msg.edit_text(f"⚠️ خطایی در اجرای تحلیل رخ داد:\n`{e}`", parse_mode="Markdown")
 
 @dp.message(F.text)
 async def handle_text_input(message: types.Message):
@@ -612,7 +617,7 @@ async def handle_text_input(message: types.Message):
 
     await message.answer(f"⏱ تایم‌فریم تحلیل **{symbol_text}** را انتخاب کنید:", reply_markup=timeframe_keyboard(symbol_text))
 
-# --- سرویس‌های پس‌زمینه (Background Tasks) ---
+# --- سرویس‌های پس‌زمینه ---
 
 async def background_alert_checker():
     while True:
