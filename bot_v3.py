@@ -47,29 +47,32 @@ def get_user(user_id: int):
         }
     return user_data[user_id]
 
-# --- تابع هوشمند تشخیص خودکار و فراخوانی مدل جمینای ---
+# --- تابع فراخوانی جمینای با اولویت Gemini 3.5 ---
 
 async def query_gemini(prompt: str) -> str:
-    # 1. دریافت لیست تمام مدل‌های فعال روی این API Key
+    # لیست ترجیحی مدل‌ها با اولویت Gemini 3.5
+    preferred_models = [
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+        "gemini-pro"
+    ]
+
+    # دریافت لیست مدل‌های فعال روی API Key به صورت پویا
     dynamic_models = []
     try:
         models_list = await asyncio.to_thread(genai.list_models)
         for m in models_list:
             if 'generateContent' in m.supported_generation_methods:
-                dynamic_models.append(m.name)
+                clean_name = m.name.replace("models/", "")
+                dynamic_models.append(clean_name)
     except Exception as e:
         logging.warning(f"Could not fetch dynamic models list: {e}")
 
-    # 2. لیست رزرو در صورت عدم دریافت لیست پویا
-    fallback_models = [
-        "gemini-1.5-flash",
-        "gemini-1.5-pro",
-        "gemini-2.0-flash",
-        "gemini-pro"
-    ]
-
-    # ترکیب و حذف تکراری‌ها
-    candidate_models = list(dict.fromkeys(dynamic_models + fallback_models))
+    # ترکیب مدل‌های ترجیحی و پویا با حفظ اولویت Gemini 3.5
+    candidate_models = list(dict.fromkeys(preferred_models + dynamic_models))
 
     last_error = None
     for model_name in candidate_models:
