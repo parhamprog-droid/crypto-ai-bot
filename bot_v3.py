@@ -25,7 +25,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "8800494482"))
 
-# اطلاعات پرداخت شما
+# اطلاعات پرداخت
 PAYMENT_CARD = "۶۲۱۹-۸۶۱۹-۵۳۴۳-۶۷۰۵ (به نام پرهام جعفری)"
 VIP_PRICE_TOMAN = "۲۳۵,۰۰۰ تومان"
 
@@ -76,7 +76,7 @@ def admin_approve_keyboard(user_id: int):
         [InlineKeyboardButton(text="❌ رد درخواست", callback_data=f"reject_vip:{user_id}")]
     ])
 
-async def get_crypto_dataframe(symbol="BTC/USDT", timeframe="1h", limit=80):
+async def get_crypto_dataframe(symbol="BTC/USDT", timeframe="1h", limit=100):
     exchange = ccxt.coinex()
     try:
         formatted_symbol = symbol.upper().strip()
@@ -91,6 +91,7 @@ async def get_crypto_dataframe(symbol="BTC/USDT", timeframe="1h", limit=80):
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         
+        # محاسبه RSI
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -98,6 +99,17 @@ async def get_crypto_dataframe(symbol="BTC/USDT", timeframe="1h", limit=80):
         df['RSI'] = 100 - (100 / (1 + rs))
         df['RSI'] = df['RSI'].fillna(50)
         
+        # محاسبه EMA 50 و EMA 200
+        df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
+        df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
+        
+        # محاسبه MACD
+        exp1 = df['Close'].ewm(span=12, adjust=False).mean()
+        exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+        df['MACD'] = exp1 - exp2
+        df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+        df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
+
         return formatted_symbol, df
     except Exception as e:
         await exchange.close()
@@ -191,21 +203,20 @@ def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> byte
         ax_main.plot([i, i], [low_p, high_p], color=color, linewidth=1)
         ax_main.bar(i, abs(close_p - open_p), bottom=min(open_p, close_p), color=color, width=0.6)
 
+    # رسم خطوط EMA روی چارت
+    ax_main.plot(range(n), df['EMA_50'], color='#2196F3', linewidth=1.2, label='EMA 50')
+    ax_main.plot(range(n), df['EMA_200'], color='#FF9800', linewidth=1.2, label='EMA 200')
+
     recent_high = df['High'].iloc[-30:].max()
     recent_low = df['Low'].iloc[-30:].min()
     last_price = df['Close'].iloc[-1]
 
-    ax_main.plot([0, n-1], [df['High'].iloc[0], recent_high], color='#8b0000', linestyle='-', linewidth=1, alpha=0.7)
-    ax_main.plot([0, n-1], [df['Low'].iloc[0], recent_low], color='#006400', linestyle='-', linewidth=1, alpha=0.7)
-    
-    support_box_bottom = recent_low * 0.995
-    ax_main.axhspan(support_box_bottom, recent_low, facecolor='#ffcccc', edgecolor='red', hatch='//', alpha=0.4)
-    
     ax_main.axhline(y=last_price, color='red', linestyle='--', linewidth=1)
     ax_main.text(n-1, last_price, f" {last_price:.4f}", color='white', backgroundcolor='red', fontsize=8, fontweight='bold', va='center')
 
     ax_main.grid(True, linestyle='--', alpha=0.5, color='#e0e0e0')
-    ax_main.set_title(f"{clean_symbol} {timeframe} - AlphaEngine Pro", fontsize=12, fontweight='bold', pad=10, color='#222222')
+    ax_main.set_title(f"{clean_symbol} {timeframe} - AlphaEngine Pro Advanced", fontsize=12, fontweight='bold', pad=10, color='#222222')
+    ax_main.legend(loc='upper left', fontsize=8)
     ax_main.yaxis.tick_right()
 
     ax_rsi.plot(range(n), df['RSI'], color='#8a2be2', linewidth=1.2)
@@ -224,33 +235,62 @@ def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> byte
     buf.seek(0)
     return buf.getvalue()
 
+async def get_btc_trend():
+    _, df_btc = await get_crypto_dataframe("BTC/USDT", "1h", 50)
+    if df_btc is not None and not df_btc.empty:
+        last_close = df_btc['Close'].iloc[-1]
+        ema_50 = df_btc['EMA_50'].iloc[-1]
+        if last_close > ema_50:
+            return "صعودی (Bullish 🟢)"
+        else:
+            return "نزولی (Bearish 🔴)"
+    return "نامشخص ⚪️"
+
 async def generate_signal(symbol: str, timeframe: str):
     formatted_symbol, df = await get_crypto_dataframe(symbol, timeframe)
     if df is None or df.empty:
         return f"⚠️ ارز **{symbol}** پیدا نشد. لطفاً نماد معتبر وارد کنید.", None
 
+    btc_trend = await get_btc_trend()
+
     price = df['Close'].iloc[-1]
     rsi = df['RSI'].iloc[-1]
+    ema_50 = df['EMA_50'].iloc[-1]
+    ema_200 = df['EMA_200'].iloc[-1]
+    macd = df['MACD'].iloc[-1]
+    macd_signal = df['MACD_Signal'].iloc[-1]
     high_24h = df['High'].max()
     low_24h = df['Low'].min()
     change_24h = ((price - df['Close'].iloc[0]) / df['Close'].iloc[0]) * 100
 
-    prompt = f"""
-    تو یک سیستم معاملاتی هوشمند کریپتو هستی. برای ارز {formatted_symbol} در تایم‌فریم {timeframe} ستاپ دقیق بنویس.
-    داده‌های مارکت:
-    - قیمت فعلی: {price} USDT
-    - بالاترین قیمت: {high_24h} | پایین‌ترین قیمت: {low_24h}
-    - شاخص RSI: {rsi:.2f}
-    - تغییرات 24 ساعت: {change_24h:.2f}%
+    macd_status = "متقاطع صعودی (Bullish Cross)" if macd > macd_signal else "متقاطع نزولی (Bearish Cross)"
+    ema_trend = "بالای EMA50 (روند صعودی)" if price > ema_50 else "پایین EMA50 (روند نزولی)"
 
-    خروجی را دقیقا با این فرمت ارسال کن:
+    prompt = f"""
+    تو یک تحلیل‌گر پیشرفته تکنیکال و معامله‌گر حرفه‌ای کریپتو هستی. برای ارز {formatted_symbol} در تایم‌فریم {timeframe} یک ستاپ معاملاتی با رعایت کامل مدیریت ریسک بنویس.
+
+    داده‌های دریافتی از چارت:
+    - روند کلی بیت‌کوین (BTC Trend): {btc_trend}
+    - قیمت فعلی: {price} USDT
+    - بالاترین 24h: {high_24h} | پایین‌ترین 24h: {low_24h}
+    - تغییرات 24 ساعت: {change_24h:.2f}%
+    - شاخص RSI: {rsi:.2f}
+    - وضعیت EMA: {ema_trend} (EMA 50: {ema_50:.4f} | EMA 200: {ema_200:.4f})
+    - وضعیت MACD: {macd_status} (MACD: {macd:.4f} | Signal: {macd_signal:.4f})
+
+    نکات مهم برای تحلیل:
+    1. اگر روند بیت‌کوین نزولی است یا RSI بسیار بالا (بالای 70) است، معامله خرید (Long) پرریسک است.
+    2. حد ضرر (Stop Loss) باید کاملاً منطقی و بر اساس حمایت/مقاومت نزدیک تعیین شود.
+    3. نسبت ریسک به ریوارد (R/R) باید حداقل 1:2 باشد.
+
+    خروجی را دقیقا با این فرمت ارایه کن:
     ⚡️ AlphaEngine Pro | #{formatted_symbol.replace('/', '')}
-    ⏱ تایم‌فریم: {timeframe}
+    ⏱ تایم‌فریم: {timeframe} | 🌐 روند بیت‌کوین: {btc_trend}
 
     🎯 ستاپ معاملاتی:
-    • جهت پیشنهادی: [Long 🟢 یا Short 🔴]
+    • جهت پیشنهادی: [Long 🟢 یا Short 🔴 یا خروج/صبر 🟡]
     • محدوده ورود (Entry Zone): [بازه قیمتی منطقی]
-    • اهرم پیشنهادی (Leverage): [Cross 2x-5x یا 5x-10x]
+    • اهرم پیشنهادی (Leverage): [Cross 1x-3x (مخصوص تازه واردین)]
 
     🚀 اهداف سودآوری (Targets):
     ▫️ TP1: [عدد]
@@ -258,10 +298,11 @@ async def generate_signal(symbol: str, timeframe: str):
     ▫️ TP3: [عدد]
 
     🛑 حد ضرر (Stop Loss): [عدد]
-    ⚖️ ریسک به ریوارد: [مثلا 1:2.5]
+    ⚖️ ریسک به ریوارد: [مثلا 1:2.2]
 
-    📊 تحلیل تکنیکال خلاصه:
-    [۲ جمله کوتاه و تحلیلی از وضعیت قیمت و RSI]
+    📊 تحلیل تکنیکال ارتقایافته:
+    • تحلیل اندیکاتورها: [بررسی خلاصه RSI، MACD و EMA]
+    • توصیه فنی: [۱ جمله کلیدی برای مدیریت ریسک معامله‌گر]
     """
 
     response_text = None
@@ -499,7 +540,7 @@ async def handle_timeframe_click(callback: types.CallbackQuery):
         return
 
     _, symbol, tf = callback.data.split(":")
-    await callback.message.edit_text(f"🔄 در حال محاسبه ستاپ هوشمند و چارت **{symbol}**...")
+    await callback.message.edit_text(f"🔄 در حال محاسبه ستاپ هوشمند و چارت پیشرفته **{symbol}**...")
     
     signal_text, chart_bytes = await generate_signal(symbol, tf)
     await callback.message.delete()
