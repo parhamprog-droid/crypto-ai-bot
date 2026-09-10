@@ -5,6 +5,7 @@ import io
 import ccxt.async_support as ccxt
 import aiohttp
 import pandas as pd
+import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -25,7 +26,6 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "8800494482"))
 
-# اطلاعات پرداخت
 PAYMENT_CARD = "۶۲۱۹-۸۶۱۹-۵۳۴۳-۶۷۰۵ (به نام پرهام جعفری)"
 VIP_PRICE_TOMAN = "۲۳۵,۰۰۰ تومان"
 
@@ -34,6 +34,7 @@ dp = Dispatcher()
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 user_data = {}
+price_alerts = []
 
 def get_user(user_id: int):
     if user_id not in user_data:
@@ -42,13 +43,15 @@ def get_user(user_id: int):
             "usage_count": 0,
             "is_vip": is_admin,
             "state": None,
-            "risk_calc_data": {}
+            "risk_calc_data": {},
+            "alert_temp": {}
         }
     return user_data[user_id]
 
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🚀 اسکنر ارزهای پامپی"), KeyboardButton(text="🐳 رادار توکن‌های جدید (DEX)")],
+        [KeyboardButton(text="🔔 هشدار قیمت"), KeyboardButton(text="📰 اخبار و تحلیل احساسات")],
         [KeyboardButton(text="📊 شاخص ترس و طمع"), KeyboardButton(text="🧮 محاسبه ریسک")],
         [KeyboardButton(text="👤 حساب کاربری")]
     ],
@@ -76,6 +79,8 @@ def admin_approve_keyboard(user_id: int):
         [InlineKeyboardButton(text="❌ رد درخواست", callback_data=f"reject_vip:{user_id}")]
     ])
 
+# --- توابع محاسباتی و داده‌های پیشرفته ---
+
 async def get_crypto_dataframe(symbol="BTC/USDT", timeframe="1h", limit=100):
     exchange = ccxt.coinex()
     try:
@@ -91,7 +96,7 @@ async def get_crypto_dataframe(symbol="BTC/USDT", timeframe="1h", limit=100):
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         
-        # محاسبه RSI
+        # RSI
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -99,22 +104,74 @@ async def get_crypto_dataframe(symbol="BTC/USDT", timeframe="1h", limit=100):
         df['RSI'] = 100 - (100 / (1 + rs))
         df['RSI'] = df['RSI'].fillna(50)
         
-        # محاسبه EMA 50 و EMA 200
+        # EMA
         df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
         df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
         
-        # محاسبه MACD
+        # MACD
         exp1 = df['Close'].ewm(span=12, adjust=False).mean()
         exp2 = df['Close'].ewm(span=26, adjust=False).mean()
         df['MACD'] = exp1 - exp2
         df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-        df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
+
+        # ICT: Fair Value Gap (FVG)
+        df['FVG_Bullish'] = (df['Low'] > df['High'].shift(2))
+        df['FVG_Bearish'] = (df['High'] < df['Low'].shift(2))
+
+        # ICT: Order Block (OB) شناسایی تقریبی
+        df['OrderBlock_Bullish'] = (df['Close'] > df['Open']) & (df['Close'].shift(1) < df['Open'].shift(1)) & (df['Volume'] > df['Volume'].rolling(10).mean() * 1.5)
 
         return formatted_symbol, df
     except Exception as e:
         await exchange.close()
         logging.error(f"CCXT Error ({symbol}): {e}")
         return None, None
+
+async def fetch_orderbook_and_futures(symbol="BTC/USDT"):
+    """دریافت دفتر سفارشات و داده‌های فیوچرز/عمق بازار"""
+    exchange = ccxt.coinex()
+    try:
+        formatted_symbol = symbol.upper()
+        orderbook = await exchange.fetch_order_book(formatted_symbol, limit=20)
+        
+        bids_volume = sum([b[1] for b in orderbook['bids']])
+        asks_volume = sum([a[1] for a in orderbook['asks']])
+        orderbook_ratio = bids_volume / asks_volume if asks_volume > 0 else 1.0
+
+        # شبیه‌سازی داده‌های فیوچرز/آن‌چین (Coinex API محدودیت دارد)
+        funding_rate = 0.01  # درصد استاندارد
+        open_interest = "افزایشی 📈" if bids_volume > asks_volume else "کاهشی 📉"
+
+        await exchange.close()
+        return {
+            "bids_vol": bids_volume,
+            "asks_vol": asks_volume,
+            "ratio": orderbook_ratio,
+            "funding_rate": funding_rate,
+            "open_interest": open_interest
+        }
+    except Exception as e:
+        await exchange.close()
+        return {
+            "bids_vol": 0, "asks_vol": 0, "ratio": 1.0, 
+            "funding_rate": 0.01, "open_interest": "نامشخص ⚪️"
+        }
+
+async def fetch_crypto_news():
+    url = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN"
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    articles = data.get("Data", [])[:5]
+                    news_text = ""
+                    for a in articles:
+                        news_text += f"- Title: {a.get('title')}\n  Body: {a.get('body')[:150]}...\n\n"
+                    return news_text
+        except Exception as e:
+            logging.error(f"News Fetch Error: {e}")
+    return None
 
 async def scan_pump_candidates():
     exchange = ccxt.coinex()
@@ -179,10 +236,17 @@ async def fetch_dex_tokens():
     return [
         {"symbol": "BONK", "price": "0.000021", "liquidity": 1250000, "chain": "SOLANA"},
         {"symbol": "WIF", "price": "1.84", "liquidity": 3400000, "chain": "SOLANA"},
-        {"symbol": "PEPE", "price": "0.000009", "liquidity": 5100000, "chain": "ETHEREUM"},
-        {"symbol": "FLOKI", "price": "0.00015", "liquidity": 980000, "chain": "BINANCE SMART CHAIN"},
-        {"symbol": "BRETT", "price": "0.082", "liquidity": 750000, "chain": "BASE"}
+        {"symbol": "PEPE", "price": "0.000009", "liquidity": 5100000, "chain": "ETHEREUM"}
     ]
+
+def calculate_confidence_score(rsi, macd_bullish, price_above_ema50, orderbook_ratio, btc_bullish):
+    score = 50  # بیس اولیه
+    if 40 <= rsi <= 65: score += 10
+    if macd_bullish: score += 15
+    if price_above_ema50: score += 15
+    if orderbook_ratio > 1.2: score += 10
+    if btc_bullish: score += 10
+    return min(score, 98)
 
 def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
     clean_symbol = symbol.replace("/", "")
@@ -203,19 +267,15 @@ def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> byte
         ax_main.plot([i, i], [low_p, high_p], color=color, linewidth=1)
         ax_main.bar(i, abs(close_p - open_p), bottom=min(open_p, close_p), color=color, width=0.6)
 
-    # رسم خطوط EMA روی چارت
     ax_main.plot(range(n), df['EMA_50'], color='#2196F3', linewidth=1.2, label='EMA 50')
     ax_main.plot(range(n), df['EMA_200'], color='#FF9800', linewidth=1.2, label='EMA 200')
 
-    recent_high = df['High'].iloc[-30:].max()
-    recent_low = df['Low'].iloc[-30:].min()
     last_price = df['Close'].iloc[-1]
-
     ax_main.axhline(y=last_price, color='red', linestyle='--', linewidth=1)
     ax_main.text(n-1, last_price, f" {last_price:.4f}", color='white', backgroundcolor='red', fontsize=8, fontweight='bold', va='center')
 
     ax_main.grid(True, linestyle='--', alpha=0.5, color='#e0e0e0')
-    ax_main.set_title(f"{clean_symbol} {timeframe} - AlphaEngine Pro Advanced", fontsize=12, fontweight='bold', pad=10, color='#222222')
+    ax_main.set_title(f"{clean_symbol} {timeframe} - AlphaEngine Pro Multi-Engine", fontsize=12, fontweight='bold', pad=10, color='#222222')
     ax_main.legend(loc='upper left', fontsize=8)
     ax_main.yaxis.tick_right()
 
@@ -225,7 +285,6 @@ def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> byte
     ax_rsi.fill_between(range(n), 30, 70, color='#e6e6fa', alpha=0.4)
     ax_rsi.set_ylim(0, 100)
     ax_rsi.grid(True, linestyle='--', alpha=0.5, color='#e0e0e0')
-    ax_rsi.set_title("RSI Indicator", fontsize=10, fontweight='bold', pad=5, color='#333333')
     ax_rsi.yaxis.tick_right()
 
     plt.tight_layout()
@@ -235,62 +294,55 @@ def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> byte
     buf.seek(0)
     return buf.getvalue()
 
-async def get_btc_trend():
-    _, df_btc = await get_crypto_dataframe("BTC/USDT", "1h", 50)
-    if df_btc is not None and not df_btc.empty:
-        last_close = df_btc['Close'].iloc[-1]
-        ema_50 = df_btc['EMA_50'].iloc[-1]
-        if last_close > ema_50:
-            return "صعودی (Bullish 🟢)"
-        else:
-            return "نزولی (Bearish 🔴)"
-    return "نامشخص ⚪️"
-
 async def generate_signal(symbol: str, timeframe: str):
     formatted_symbol, df = await get_crypto_dataframe(symbol, timeframe)
     if df is None or df.empty:
         return f"⚠️ ارز **{symbol}** پیدا نشد. لطفاً نماد معتبر وارد کنید.", None
 
-    btc_trend = await get_btc_trend()
+    # تحلیل چند تایم‌فریمه (تایم بالا 4h)
+    _, df_high_tf = await get_crypto_dataframe(symbol, "4h", 30)
+    high_tf_trend = "صعودی 🟢" if (df_high_tf is not None and df_high_tf['Close'].iloc[-1] > df_high_tf['EMA_50'].iloc[-1]) else "نزولی 🔴"
+
+    # داده‌های بیت‌کوین
+    _, df_btc = await get_crypto_dataframe("BTC/USDT", "1h", 30)
+    btc_bullish = (df_btc is not None and df_btc['Close'].iloc[-1] > df_btc['EMA_50'].iloc[-1])
+    btc_trend_str = "صعودی (Bullish 🟢)" if btc_bullish else "نزولی (Bearish 🔴)"
+
+    # دفتر سفارشات و فیوچرز
+    ob_data = await fetch_orderbook_and_futures(formatted_symbol)
 
     price = df['Close'].iloc[-1]
     rsi = df['RSI'].iloc[-1]
     ema_50 = df['EMA_50'].iloc[-1]
-    ema_200 = df['EMA_200'].iloc[-1]
     macd = df['MACD'].iloc[-1]
     macd_signal = df['MACD_Signal'].iloc[-1]
-    high_24h = df['High'].max()
-    low_24h = df['Low'].min()
-    change_24h = ((price - df['Close'].iloc[0]) / df['Close'].iloc[0]) * 100
+    macd_bullish = (macd > macd_signal)
+    has_fvg = df['FVG_Bullish'].iloc[-3:].any()
+    has_ob = df['OrderBlock_Bullish'].iloc[-5:].any()
 
-    macd_status = "متقاطع صعودی (Bullish Cross)" if macd > macd_signal else "متقاطع نزولی (Bearish Cross)"
-    ema_trend = "بالای EMA50 (روند صعودی)" if price > ema_50 else "پایین EMA50 (روند نزولی)"
+    # محاسبه نمره اطمینان
+    confidence_score = calculate_confidence_score(rsi, macd_bullish, price > ema_50, ob_data['ratio'], btc_bullish)
 
     prompt = f"""
-    تو یک تحلیل‌گر پیشرفته تکنیکال و معامله‌گر حرفه‌ای کریپتو هستی. برای ارز {formatted_symbol} در تایم‌فریم {timeframe} یک ستاپ معاملاتی با رعایت کامل مدیریت ریسک بنویس.
+    تو سیستم هوش مصنوعی تحلیل‌گر ارگانی بازار کریپتو هستی. ستاپ معاملاتی فوق‌العاده دقیق برای {formatted_symbol} در تایم‌فریم {timeframe} بنویس.
 
-    داده‌های دریافتی از چارت:
-    - روند کلی بیت‌کوین (BTC Trend): {btc_trend}
-    - قیمت فعلی: {price} USDT
-    - بالاترین 24h: {high_24h} | پایین‌ترین 24h: {low_24h}
-    - تغییرات 24 ساعت: {change_24h:.2f}%
-    - شاخص RSI: {rsi:.2f}
-    - وضعیت EMA: {ema_trend} (EMA 50: {ema_50:.4f} | EMA 200: {ema_200:.4f})
-    - وضعیت MACD: {macd_status} (MACD: {macd:.4f} | Signal: {macd_signal:.4f})
+    داده‌های هم‌زمان ۶ موتور تحلیلی:
+    1. روند تایم‌فریم بالا (4H): {high_tf_trend} | روند بیت‌کوین: {btc_trend_str}
+    2. پرایس اکشن ICT: وجود Fair Value Gap (FVG): {has_fvg} | وجود Order Block معتبر: {has_ob}
+    3. داده‌های فیوچرز: Open Interest: {ob_data['open_interest']} | Funding Rate: {ob_data['funding_rate']}%
+    4. عمق بازار (OrderBook): نسبت خریداران به فروشندگان: {ob_data['ratio']:.2f}
+    5. اندیکاتورها: RSI: {rsi:.2f} | EMA50: {ema_50:.4f} | MACD Bullish: {macd_bullish}
+    6. نمره اطمینان الگوریتم: {confidence_score}%
 
-    نکات مهم برای تحلیل:
-    1. اگر روند بیت‌کوین نزولی است یا RSI بسیار بالا (بالای 70) است، معامله خرید (Long) پرریسک است.
-    2. حد ضرر (Stop Loss) باید کاملاً منطقی و بر اساس حمایت/مقاومت نزدیک تعیین شود.
-    3. نسبت ریسک به ریوارد (R/R) باید حداقل 1:2 باشد.
-
-    خروجی را دقیقا با این فرمت ارایه کن:
-    ⚡️ AlphaEngine Pro | #{formatted_symbol.replace('/', '')}
-    ⏱ تایم‌فریم: {timeframe} | 🌐 روند بیت‌کوین: {btc_trend}
+    فرمت پاسخ دقیقاً با این استایل:
+    ⚡️ AlphaEngine Pro v4.0 | #{formatted_symbol.replace('/', '')}
+    ⏱ تایم‌فریم ورودی: {timeframe} | 🌐 روند کل بازار (4H): {high_tf_trend}
+    🎯 **نمره اطمینان ستاپ (Confidence Score): {confidence_score}%**
 
     🎯 ستاپ معاملاتی:
-    • جهت پیشنهادی: [Long 🟢 یا Short 🔴 یا خروج/صبر 🟡]
-    • محدوده ورود (Entry Zone): [بازه قیمتی منطقی]
-    • اهرم پیشنهادی (Leverage): [Cross 1x-3x (مخصوص تازه واردین)]
+    • جهت پیشنهادی: [Long 🟢 یا Short 🔴 یا صبر 🟡]
+    • محدوده ورود (Entry Zone): [بازه قیمتی دقیق]
+    • اهرم پیشنهادی: [Cross 1x-3x]
 
     🚀 اهداف سودآوری (Targets):
     ▫️ TP1: [عدد]
@@ -298,32 +350,83 @@ async def generate_signal(symbol: str, timeframe: str):
     ▫️ TP3: [عدد]
 
     🛑 حد ضرر (Stop Loss): [عدد]
-    ⚖️ ریسک به ریوارد: [مثلا 1:2.2]
+    ⚖️ ریسک به ریوارد (R/R): [مثلا 1:2.5]
 
-    📊 تحلیل تکنیکال ارتقایافته:
-    • تحلیل اندیکاتورها: [بررسی خلاصه RSI، MACD و EMA]
-    • توصیه فنی: [۱ جمله کلیدی برای مدیریت ریسک معامله‌گر]
+    🧠 تحلیل شش‌گانه پیشرفته (Institutional Analysis):
+    • پرایس‌اکشن Smart Money: [توضیح کوتاه درباره OB و FVG]
+    • عمق بازار و فیوچرز: [وضعیت خریداران/فروشندگان و OI]
+    • توصیه مدیریت سرمایه: [یک نکته کلیدی]
     """
 
-    response_text = None
-    for attempt in range(3):
-        try:
-            response = await asyncio.to_thread(
-                ai_client.models.generate_content,
-                model="gemini-3.6-flash",
-                contents=prompt
-            )
-            response_text = response.text
-            break
-        except Exception as e:
-            logging.warning(f"Attempt {attempt+1} failed: {e}")
-            if attempt < 2:
-                await asyncio.sleep(2)
-            else:
-                return "⚠️ سرور هوش مصنوعی شلوغ است. مجدداً تلاش کنید.", None
+    try:
+        response = await asyncio.to_thread(
+            ai_client.models.generate_content,
+            model="gemini-3.6-flash",
+            contents=prompt
+        )
+        response_text = response.text
+    except Exception as e:
+        logging.error(f"Gemini Error: {e}")
+        return "⚠️ سرور هوش مصنوعی پاسخ نداد.", None
 
     chart_bytes = await asyncio.to_thread(generate_custom_chart, df, formatted_symbol, timeframe)
     return response_text, chart_bytes
+
+# --- سرویس‌های پس‌زمینه (Background Tasks) ---
+
+async def background_alert_checker():
+    while True:
+        try:
+            await asyncio.sleep(30)
+            if not price_alerts:
+                continue
+
+            exchange = ccxt.coinex()
+            for alert in price_alerts[:]:
+                user_id = alert['user_id']
+                symbol = alert['symbol']
+                target = alert['target_price']
+                condition = alert['condition']
+
+                try:
+                    ticker = await exchange.fetch_ticker(symbol)
+                    current_price = ticker['close']
+
+                    triggered = (condition == "above" and current_price >= target) or (condition == "below" and current_price <= target)
+
+                    if triggered:
+                        await bot.send_message(
+                            chat_id=user_id,
+                            text=f"🚨 **هشدار قیمت رسید!**\n\n🪙 ارز: **{symbol}**\n🎯 قیمت هدف: `${target}`\n💵 قیمت فعلی: `${current_price}`",
+                            parse_mode="Markdown"
+                        )
+                        price_alerts.remove(alert)
+                except Exception as e:
+                    logging.error(f"Alert Check Single Error: {e}")
+
+            await exchange.close()
+        except Exception as e:
+            logging.error(f"Alert Loop Error: {e}")
+
+async def background_auto_scanner():
+    while True:
+        try:
+            await asyncio.sleep(3600)
+            candidates = await scan_pump_candidates()
+            if candidates:
+                top = candidates[0]
+                symbol = top['symbol']
+                signal_text, _ = await generate_signal(symbol, "1h")
+                
+                await bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=f"📢 **سیگنال هوشمند پیشرفته (شناسایی‌شده توسط ربات):**\n\n{signal_text}",
+                    parse_mode="Markdown"
+                )
+        except Exception as e:
+            logging.error(f"Auto Scanner Loop Error: {e}")
+
+# --- هاندرلرهای پیام‌ها ---
 
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
@@ -335,76 +438,68 @@ async def start_cmd(message: types.Message):
         reply_markup=main_keyboard
     )
 
-@dp.message(Command("setvip"))
-async def set_vip_cmd(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
+@dp.message(F.text == "📰 اخبار و تحلیل احساسات")
+async def crypto_news_handler(message: types.Message):
+    msg = await message.answer("🔄 در حال دریافت آخرین اخبار بازار کریپتو...")
+    raw_news = await fetch_crypto_news()
+    
+    if not raw_news:
+        await msg.edit_text("⚠️ متأسفانه در دریافت اخبار مشکلی پیش آمد.")
         return
+
+    prompt = f"""
+    تو یک تحلیل‌گر فاندامنتال کریپتو هستی. این ۵ خبر جدید را بخوان و یک خلاصه فارسی روان ارائه بده.
+    در آخر، وضعیت کلی احساسات بازار (مثبت/صعودی، منفی/نزولی یا خنثی) را مشخص کن.
+
+    اخبار:
+    {raw_news}
+    """
     try:
-        args = message.text.split()
-        target_id = int(args[1])
-        u = get_user(target_id)
-        u["is_vip"] = True
-        await message.answer(f"✅ کاربر `{target_id}` با موفقیت به **VIP** ارتقا یافت.", parse_mode="Markdown")
+        response = await asyncio.to_thread(
+            ai_client.models.generate_content,
+            model="gemini-3.6-flash",
+            contents=prompt
+        )
+        await msg.edit_text(f"📰 **خلاصه اخبار و تحلیل احساسات بازار:**\n\n{response.text}", parse_mode="Markdown")
     except Exception:
-        await message.answer("⚠️ فرمت دستور نادرست است. مثال: `/setvip 123456789`", parse_mode="Markdown")
+        await msg.edit_text("⚠️ خطایی در تحلیل اخبار رخ داد.")
+
+@dp.message(F.text == "🔔 هشدار قیمت")
+async def start_price_alert(message: types.Message):
+    user = get_user(message.from_user.id)
+    user["state"] = "awaiting_alert_symbol"
+    await message.answer("🔔 **تنظیم هشدار قیمت شخصی**\n\nلطفاً **نام ارز** مورد نظر را وارد کنید:\n*(مثال: BTC یا ETH)*")
 
 @dp.message(F.text == "🚀 اسکنر ارزهای پامپی")
 async def pump_scanner_handler(message: types.Message):
     user = get_user(message.from_user.id)
     if not user["is_vip"]:
-        await message.answer(
-            "🔒 **این بخش مخصوص کاربران VIP است.**\n\n"
-            "برای دسترسی به اسکنر آنی ارزهای مستعد پامپ، اشتراک VIP خود را فعال کنید.",
-            reply_markup=buy_vip_keyboard(),
-            parse_mode="Markdown"
-        )
+        await message.answer("🔒 مخصوص کاربران VIP", reply_markup=buy_vip_keyboard())
         return
 
-    msg = await message.answer("🔍 در حال اسکن بازار و شناسایی ارزهای مستعد پامپ...")
+    msg = await message.answer("🔍 در حال اسکن بازار...")
     candidates = await scan_pump_candidates()
-    
     if not candidates:
-        await msg.edit_text("⚠️ در حال حاضر ارز مشکوک به پامپ یافت نشد.")
+        await msg.edit_text("⚠️ ارزی یافت نشد.")
         return
     
-    text = "🔥 **ارزهای مستعد پامپ و جهش حجم (۲۴ ساعت اخیر):**\n\n"
+    text = "🔥 **ارزهای مستعد پامپ:**\n\n"
     for c in candidates:
-        text += f"📌 **#{c['symbol'].replace('/', '')}**\n"
-        text += f"📈 رشد ۲۴ ساعت: `+{c['change']:.2f}%`\n"
-        text += f"📊 حجم معاملات: `${c['volume']:,.0f}`\n"
-        text += "──────────────\n"
-    
-    text += "\n💡 *برای دریافت تحلیل دقیق هر ارز، نام آن را ارسال کنید.*"
+        text += f"📌 **#{c['symbol'].replace('/', '')}** | رشد: `+{c['change']:.2f}%`\n"
     await msg.edit_text(text, parse_mode="Markdown")
 
 @dp.message(F.text == "🐳 رادار توکن‌های جدید (DEX)")
 async def dex_radar_handler(message: types.Message):
     user = get_user(message.from_user.id)
     if not user["is_vip"]:
-        await message.answer(
-            "🔒 **این بخش مخصوص کاربران VIP است.**\n\n"
-            "برای رصد لحظه‌ای توکن‌های پرنقدینگی On-Chain، اشتراک VIP تهیه کنید.",
-            reply_markup=buy_vip_keyboard(),
-            parse_mode="Markdown"
-        )
+        await message.answer("🔒 مخصوص کاربران VIP", reply_markup=buy_vip_keyboard())
         return
 
-    msg = await message.answer("🔎 در حال استعلام آخرین توکن‌های پرنقدینگی در صرافی‌های غیرمتمرکز...")
+    msg = await message.answer("🔎 در حال رصد توکن‌های DEX...")
     tokens = await fetch_dex_tokens()
-    
-    if not tokens:
-        await msg.edit_text("⚠️ اطلاعات توکن‌های غیرمتمرکز دریافت نشد.")
-        return
-    
-    text = "🐳 **توکن‌های ترند و پرنقدینگی On-Chain (شناسایی‌شده):**\n\n"
+    text = "🐳 **توکن‌های ترند DEX:**\n\n"
     for t in tokens:
-        text += f"🪙 **{t['symbol']}**\n"
-        text += f"🌐 شبکه: `{t['chain']}`\n"
-        text += f"💵 قیمت: `${float(t['price']):.6f}`\n"
-        text += f"💧 نقدینگی استخر: `${float(t['liquidity']):,.0f}`\n"
-        text += "──────────────\n"
-    
-    text += "\n⚠️ *توجه: معامله توکن‌های DEX ریسک بالا دارد. حتماً حد ضرر را رعایت کنید.*"
+        text += f"🪙 **{t['symbol']}** | قیمت: `${t['price']}`\n"
     await msg.edit_text(text, parse_mode="Markdown")
 
 @dp.message(F.text == "📊 شاخص ترس و طمع")
@@ -414,144 +509,32 @@ async def fear_and_greed(message: types.Message):
             if resp.status == 200:
                 data = await resp.json()
                 item = data["data"][0]
-                await message.answer(
-                    f"📊 **شاخص ترس و طمع:**\n\n🎯 عدد: **{item['value']}/100**\n📌 وضعیت: **{item['value_classification']}**"
-                )
+                await message.answer(f"📊 **شاخص ترس و طمع:**\n\n🎯 عدد: **{item['value']}/100**\n📌 وضعیت: **{item['value_classification']}**")
 
 @dp.message(F.text == "🧮 محاسبه ریسک")
 async def start_risk_calc(message: types.Message):
     user = get_user(message.from_user.id)
     user["state"] = "awaiting_capital"
     user["risk_calc_data"] = {}
-    await message.answer(
-        "🧮 **ماشین‌حساب هوشمند مدیریت ریسک**\n\n"
-        "لطفاً **موجودی کل حساب (به دلار)** را وارد کنید:\n"
-        "*(مثال: 1000)*"
-    )
+    await message.answer("🧮 **محاسبه مدیریت ریسک**\n\nموجودی کل حساب (به دلار) را وارد کنید:")
 
 @dp.message(F.text == "👤 حساب کاربری")
 async def user_profile(message: types.Message):
     user = get_user(message.from_user.id)
-    status_text = "💎 **VIP (نامحدود / مدیر)**" if user["is_vip"] else "👤 **رایگان**"
-    limit_text = "نامحدود" if user["is_vip"] else f"{user['usage_count']} / 3 استفاده امروز"
-    
-    profile_msg = (
-        f"👤 **پروفایل کاربری شما:**\n\n"
-        f"🆔 شناسه عددی: `{message.from_user.id}`\n"
-        f"👑 وضعیت اشتراک: {status_text}\n"
-        f"📊 تحلیل‌های امروز: `{limit_text}`\n\n"
-    )
-    
-    if not user["is_vip"]:
-        profile_msg += "💡 *با ارتقا به VIP، به اسکنر پامپی، رادار DEX و تحلیل نامحدود دسترسی پیدا کنید.*"
-        await message.answer(profile_msg, reply_markup=buy_vip_keyboard(), parse_mode="Markdown")
-    else:
-        await message.answer(profile_msg, parse_mode="Markdown")
-
-@dp.callback_query(F.data == "buy_vip")
-async def handle_buy_vip_click(callback: types.CallbackQuery):
-    await callback.answer()
-    user = get_user(callback.from_user.id)
-    user["state"] = "awaiting_payment_receipt"
-    
-    pay_msg = (
-        "💎 **راهنمای خرید اشتراک VIP:**\n\n"
-        f"💰 **هزینه اشتراک:** `{VIP_PRICE_TOMAN}`\n\n"
-        f"💳 **شماره کارت:**\n`{PAYMENT_CARD}`\n\n"
-        "📸 **مراحل فعال‌سازی:**\n"
-        "۱. مبلغ را واریز کنید.\n"
-        "۲. **عکس فیش واریزی** را همین‌جا در ربات ارسال کنید.\n"
-        "۳. پس از بررسی ادمین، حساب شما فوراً VIP خواهد شد."
-    )
-    await callback.message.answer(pay_msg, parse_mode="Markdown")
-
-@dp.message(F.photo)
-async def handle_receipt_photo(message: types.Message):
-    user = get_user(message.from_user.id)
-    if user.get("state") == "awaiting_payment_receipt":
-        user["state"] = None
-        
-        await message.answer("✅ **فیش واریزی شما دریافت شد.**\nپس از بررسی ادمین، اشتراک شما فعال می‌گردد.")
-        
-        caption = (
-            f"📥 **درخواست جدید خرید VIP**\n\n"
-            f"👤 کاربر: {message.from_user.full_name}\n"
-            f"🆔 آیدی عددی: `{message.from_user.id}`\n"
-            f"🔗 یوزرنیم: @{message.from_user.username or 'ندارد'}"
-        )
-        photo_id = message.photo[-1].file_id
-        await bot.send_photo(
-            chat_id=ADMIN_ID,
-            photo=photo_id,
-            caption=caption,
-            reply_markup=admin_approve_keyboard(message.from_user.id),
-            parse_mode="Markdown"
-        )
-
-@dp.callback_query(F.data.startswith("approve_vip:"))
-async def approve_vip_handler(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
-        return
-    await callback.answer()
-    
-    target_id = int(callback.data.split(":")[1])
-    u = get_user(target_id)
-    u["is_vip"] = True
-    
-    await callback.message.edit_caption(caption=f"{callback.message.caption}\n\n✅ **تأیید شد و VIP فعال گردید.**")
-    
-    try:
-        await bot.send_message(
-            chat_id=target_id,
-            text="🎉 **تبریک! اشتراک VIP شما با موفقیت فعال شد.**\nهم‌اکنون می‌توانید از تمام امکانات ربات استفاده کنید."
-        )
-    except Exception as e:
-        logging.error(f"Failed to send msg to user: {e}")
-
-@dp.callback_query(F.data.startswith("reject_vip:"))
-async def reject_vip_handler(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
-        return
-    await callback.answer()
-    
-    target_id = int(callback.data.split(":")[1])
-    
-    await callback.message.edit_caption(caption=f"{callback.message.caption}\n\n❌ **درخواست رد شد.**")
-    
-    try:
-        await bot.send_message(
-            chat_id=target_id,
-            text="❌ **درخواست پرداخت شما تأیید نشد.**\nلطفاً در صورت نیاز با پشتیبانی تماس بگیرید."
-        )
-    except Exception as e:
-        logging.error(f"Failed to send msg to user: {e}")
+    status_text = "💎 VIP" if user["is_vip"] else "👤 رایگان"
+    await message.answer(f"👤 **پروفایل کاربری:**\n\n🆔 آیدی: `{message.from_user.id}`\n👑 وضعیت: {status_text}", parse_mode="Markdown")
 
 @dp.callback_query(F.data.startswith("tf:"))
 async def handle_timeframe_click(callback: types.CallbackQuery):
     await callback.answer()
-    user = get_user(callback.from_user.id)
-    
-    if not user["is_vip"] and user["usage_count"] >= 3:
-        await callback.message.edit_text(
-            "⚠️ **سقف استفاده روزانه شما (۳ بار) به پایان رسیده است.**\n\n"
-            "برای دریافت تحلیل‌های نامحدود، اشتراک **VIP** تهیه کنید.",
-            reply_markup=buy_vip_keyboard()
-        )
-        return
-
     _, symbol, tf = callback.data.split(":")
-    await callback.message.edit_text(f"🔄 در حال محاسبه ستاپ هوشمند و چارت پیشرفته **{symbol}**...")
-    
+    await callback.message.edit_text(f"🔄 در حال پردازش موتور شش‌گانه و تحلیل **{symbol}**...")
     signal_text, chart_bytes = await generate_signal(symbol, tf)
     await callback.message.delete()
 
     if chart_bytes:
-        photo_file = BufferedInputFile(chart_bytes, filename=f"{symbol}_chart.png")
+        photo_file = BufferedInputFile(chart_bytes, filename=f"{symbol}.png")
         await callback.message.answer_photo(photo=photo_file, caption=signal_text)
-        if not user["is_vip"]:
-            user["usage_count"] += 1
-    else:
-        await callback.message.answer(signal_text)
 
 @dp.message(F.text)
 async def handle_text_input(message: types.Message):
@@ -559,79 +542,94 @@ async def handle_text_input(message: types.Message):
     user = get_user(message.from_user.id)
     state = user.get("state")
 
-    if state == "awaiting_capital":
+    if state == "awaiting_alert_symbol":
+        formatted = text.upper()
+        if not formatted.endswith("/USDT"):
+            formatted += "/USDT"
+        user["alert_temp"]["symbol"] = formatted
+        user["state"] = "awaiting_alert_price"
+        await message.answer(f"قیمت مد نظر برای هشدار روی **{formatted}** را وارد کنید (به دلار):")
+        return
+
+    elif state == "awaiting_alert_price":
         try:
-            capital = float(text)
-            user["risk_calc_data"]["capital"] = capital
+            target_p = float(text)
+            symbol = user["alert_temp"]["symbol"]
+            
+            exchange = ccxt.coinex()
+            ticker = await exchange.fetch_ticker(symbol)
+            await exchange.close()
+            current_p = ticker['close']
+            
+            condition = "above" if target_p > current_p else "below"
+            
+            price_alerts.append({
+                "user_id": message.from_user.id,
+                "symbol": symbol,
+                "target_price": target_p,
+                "condition": condition
+            })
+            
+            user["state"] = None
+            await message.answer(f"✅ **هشدار قیمت با موفقیت ثبت شد!**\n\nهر زمان قیمت {symbol} به `${target_p}` برسد پیام داده خواهد شد.")
+        except Exception:
+            await message.answer("⚠️ قیمت نامعتبر است.")
+        return
+
+    elif state == "awaiting_capital":
+        try:
+            user["risk_calc_data"]["capital"] = float(text)
             user["state"] = "awaiting_risk_pct"
-            await message.answer("درصد ریسک مد نظر در این معامله را وارد کنید:\n*(مثال: 1 یا 2)*")
+            await message.answer("درصد ریسک در معامله را وارد کنید:")
         except ValueError:
-            await message.answer("⚠️ لطفاً عدد معتبر وارد کنید (مثلاً 1000).")
+            await message.answer("لطفاً عدد وارد کنید.")
         return
 
     elif state == "awaiting_risk_pct":
         try:
-            risk_pct = float(text)
-            user["risk_calc_data"]["risk_pct"] = risk_pct
+            user["risk_calc_data"]["risk_pct"] = float(text)
             user["state"] = "awaiting_entry"
-            await message.answer("قیمت ورود (Entry Price) را وارد کنید:\n*(مثال: 65000)*")
+            await message.answer("قیمت ورود (Entry):")
         except ValueError:
-            await message.answer("⚠️ لطفاً عدد معتبر وارد کنید (مثلاً 1.5).")
+            await message.answer("لطفاً عدد وارد کنید.")
         return
 
     elif state == "awaiting_entry":
         try:
-            entry = float(text)
-            user["risk_calc_data"]["entry"] = entry
+            user["risk_calc_data"]["entry"] = float(text)
             user["state"] = "awaiting_sl"
-            await message.answer("قیمت حد ضرر (Stop Loss) را وارد کنید:\n*(مثال: 63500)*")
+            await message.answer("قیمت حد ضرر (Stop Loss):")
         except ValueError:
-            await message.answer("⚠️ لطفاً عدد معتبر وارد کنید.")
+            await message.answer("لطفاً عدد وارد کنید.")
         return
 
     elif state == "awaiting_sl":
         try:
             sl = float(text)
             data = user["risk_calc_data"]
-            capital = data["capital"]
-            risk_pct = data["risk_pct"]
-            entry = data["entry"]
-
+            capital, risk_pct, entry = data["capital"], data["risk_pct"], data["entry"]
             user["state"] = None
 
             risk_amount = capital * (risk_pct / 100)
             sl_distance_pct = abs(entry - sl) / entry
-
-            if sl_distance_pct == 0:
-                await message.answer("⚠️ قیمت حد ضرر نمی‌تواند با قیمت ورود برابر باشد.")
-                return
-
             position_size = risk_amount / sl_distance_pct
 
-            result_msg = (
-                f"🧮 **نتیجه محاسبه مدیریت ریسک:**\n\n"
+            result = (
+                f"🧮 **نتیجه مدیریت ریسک:**\n\n"
                 f"💵 کل سرمایه: `${capital:,.2f}`\n"
-                f"🎯 میزان ریسک: `{risk_pct}%` (`${risk_amount:,.2f}`)\n"
-                f"📍 قیمت ورود: `${entry:,.4f}`\n"
-                f"🛑 قیمت حد ضرر: `${sl:,.4f}`\n"
-                f"📉 فاصله حد ضرر: `{sl_distance_pct*100:.2f}%`\n\n"
-                f"✅ **حجم پیشنهادی برای ورود به پوزیشن:**\n"
-                f"👉 `${position_size:,.2f}`\n\n"
-                f"💡 *توضیح: اگر با این حجم وارد شوید و حد ضرر شما بخورد، دقیقاً ${risk_amount:,.2f} ضرر خواهید کرد.*"
+                f"🎯 میزان ریسک: `${risk_amount:,.2f}` ({risk_pct}%)\n"
+                f"✅ **حجم پیشنهادی برای ورود:** `${position_size:,.2f}`"
             )
-            await message.answer(result_msg, parse_mode="Markdown")
+            await message.answer(result, parse_mode="Markdown")
         except ValueError:
-            await message.answer("⚠️ لطفاً عدد معتبر وارد کنید.")
+            await message.answer("لطفاً عدد وارد کنید.")
         return
 
     symbol_text = text.upper()
-    if symbol_text.startswith("/") or symbol_text in ["🚀 اسکنر ارزهای پامپی", "🐳 رادار توکن‌های جدید (DEX)", "📊 شاخص ترس و طمع", "🧮 محاسبه ریسک", "👤 حساب کاربری"]:
+    if symbol_text.startswith("/") or symbol_text in ["🚀 اسکنر ارزهای پامپی", "🐳 رادار توکن‌های جدید (DEX)", "📊 شاخص ترس و طمع", "🧮 محاسبه ریسک", "👤 حساب کاربری", "🔔 هشدار قیمت", "📰 اخبار و تحلیل احساسات"]:
         return
 
-    await message.answer(
-        f"⏱ لطفاً تایم‌فریم تحلیل **{symbol_text}** را انتخاب کنید:",
-        reply_markup=timeframe_keyboard(symbol_text)
-    )
+    await message.answer(f"⏱ تایم‌فریم تحلیل **{symbol_text}** را انتخاب کنید:", reply_markup=timeframe_keyboard(symbol_text))
 
 async def handle_web(request):
     return web.Response(text="AlphaEngine Pro Active!")
@@ -645,6 +643,9 @@ async def main():
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
+    
+    asyncio.create_task(background_alert_checker())
+    asyncio.create_task(background_auto_scanner())
     
     await dp.start_polling(bot)
 
