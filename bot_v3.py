@@ -83,11 +83,12 @@ def buy_vip_keyboard():
 
 async def detect_whale_traps_and_stress_test(symbol: str, df: pd.DataFrame, orderbook_data: dict):
     """موتور اختصاصی تشخیص تله‌های نهنگ و استرس‌تست"""
-    last_volume = df['Volume'].iloc[-1]
-    volume_mean = df['Volume'].rolling(20).mean().iloc[-1]
-    
     volatility = df['Close'].pct_change().std() * 100
-    estimated_beta = round(volatility / 1.2, 2) if not np.isnan(volatility) else 1.5
+    
+    if "BTC" in symbol.upper():
+        estimated_beta = 1.0
+    else:
+        estimated_beta = round(volatility / 1.2, 2) if not np.isnan(volatility) else 1.5
     
     ratio = orderbook_data.get('ratio', 1.0)
     spoofing_risk = "ریسک بالا ⚠️ (احتمال وجود دیوارهای فیک)" if ratio > 2.2 or ratio < 0.4 else "طبیعی 🟢"
@@ -186,15 +187,28 @@ async def scan_pump_candidates():
         
         candidates = []
         for symbol, data in tickers.items():
-            if symbol.endswith("/USDT") and data.get('quoteVolume') and data['quoteVolume'] > 100000:
-                change = data.get('percentage', 0)
-                if 5 <= change <= 30:
+            if symbol.endswith("/USDT"):
+                volume = data.get('quoteVolume') or 0
+                change = data.get('percentage') or 0
+                
+                if volume >= 30000 and change >= 2.0:
                     candidates.append({
                         'symbol': symbol,
-                        'change': change,
-                        'volume': data['quoteVolume']
+                        'change': float(change),
+                        'volume': float(volume)
                     })
         
+        if not candidates:
+            for symbol, data in tickers.items():
+                if symbol.endswith("/USDT"):
+                    change = data.get('percentage') or 0
+                    if change >= 1.0:
+                        candidates.append({
+                            'symbol': symbol,
+                            'change': float(change),
+                            'volume': float(data.get('quoteVolume') or 0)
+                        })
+
         candidates = sorted(candidates, key=lambda x: x['change'], reverse=True)[:5]
         return candidates
     except Exception as e:
@@ -219,7 +233,6 @@ async def fetch_dex_tokens():
                         raw_name = attr.get("name", "N/A")
                         symbol = raw_name.split("/")[0].strip() if "/" in raw_name else raw_name
                         
-                        # گرد کردن قیمتی که در عکس مشخص بود
                         raw_price = float(attr.get("base_token_price_usd") or 0)
                         formatted_price = f"{raw_price:.6f}".rstrip('0').rstrip('.') if raw_price > 0 else "0"
 
@@ -291,6 +304,13 @@ async def generate_signal(symbol: str, timeframe: str):
     if df is None or df.empty:
         return f"⚠️ ارز **{symbol}** پیدا نشد. لطفاً نماد معتبر وارد کنید.", None
 
+    df['TR'] = np.maximum(
+        df['High'] - df['Low'], 
+        np.maximum(abs(df['High'] - df['Close'].shift(1)), abs(df['Low'] - df['Close'].shift(1)))
+    )
+    df['ATR'] = df['TR'].rolling(window=14).mean()
+    atr_val = round(float(df['ATR'].iloc[-1]), 4)
+
     _, df_high_tf = await get_crypto_dataframe(symbol, "4h", 30)
     high_tf_trend = "صعودی 🟢" if (df_high_tf is not None and df_high_tf['Close'].iloc[-1] > df_high_tf['EMA_50'].iloc[-1]) else "نزولی 🔴"
 
@@ -311,36 +331,44 @@ async def generate_signal(symbol: str, timeframe: str):
     confidence_score = calculate_confidence_score(rsi, macd_bullish, price > ema_50, ob_data['ratio'], btc_bullish)
 
     prompt = f"""
-    تو سیستم هوش مصنوعی تحلیل‌گر ارگانی بازار کریپتو هستی. ستاپ معاملاتی فوق‌العاده دقیق برای {formatted_symbol} در تایم‌فریم {timeframe} بنویس.
+    تو ارشد مدیریت ریسک و تحلیل‌گر ارگانی یک هج‌فاند کریپتو هستی. یک ستاپ فوق‌العاده پیشرفته برای {formatted_symbol} در تایم‌فریم {timeframe} صادر کن.
 
-    داده‌های تحلیلی:
-    1. روند 4H: {high_tf_trend} | روند BTC: {btc_trend_str}
-    2. FVG: {has_fvg} | Order Block: {has_ob}
-    3. فیوچرز: Open Interest: {ob_data['open_interest']} | Funding Rate: {ob_data['funding_rate']}%
-    4. نسبت OrderBook: {ob_data['ratio']:.2f}
-    5. رادار تله نهنگ: ریسک دیوارهای فیک: {whale_trap['spoofing_risk']} | محدوده شکار نقدینگی: {whale_trap['sweep_zone']} | اثر ریزش ۲٪ بیت‌کوین: -{whale_trap['btc_drop_impact']}%
-    6. RSI: {rsi:.2f} | EMA50: {ema_50:.4f} | نمره اطمینان: {confidence_score}%
+    داده‌های فنی:
+    - قیمت فعلی: {price} | ATR ۱۴ دوره‌ای (میزان نویز): {atr_val}
+    - روند 4H: {high_tf_trend} | روند BTC: {btc_trend_str}
+    - ICT FVG: {has_fvg} | Order Block: {has_ob}
+    - وضعیت فیوچرز: Open Interest: {ob_data['open_interest']} | نسبت سفارشات: {ob_data['ratio']:.2f}
+    - رادار تله نهنگ: دیوارهای فیک: {whale_trap['spoofing_risk']} | منطقه شکار نقدینگی: {whale_trap['sweep_zone']}
+    - RSI: {rsi:.2f} | نمره اطمینان ریاضی: {confidence_score}%
 
-    فرمت پاسخ:
-    ⚡️ AlphaEngine Pro v4.0 | #{formatted_symbol.replace('/', '')}
-    ⏱ تایم‌فریم: {timeframe} | 🌐 روند کل (4H): {high_tf_trend}
-    🎯 **نمره اطمینان: {confidence_score}%**
+    فرمت خروجی دقیقاً طبق ساختار زیر باشد:
 
-    🎯 ستاپ معاملاتی:
-    • جهت پیشنهادی: [Long 🟢 / Short 🔴 / صبر 🟡]
-    • محدوده ورود: [بازه قیمتی]
+    ⚡️ AlphaEngine Pro v5.0 (Institutional Edition)
+    📊 نماد: #{formatted_symbol.replace('/', '')} | تایم‌فریم: {timeframe}
+    🌐 ساختار کل مارکت (4H): {high_tf_trend}
+    🛡 **نمره اطمینان ستاپ: {confidence_score}%**
+
+    🎯 ستاپ معاملاتی هج‌فاند:
+    • جهت معامله: [Long 🟢 / Short 🔴 / Wait 🟡]
+    • محدوده ورود (Entry Zone): [بازه دقیق]
     • اهرم پیشنهادی: [Cross 1x-3x]
 
-    🚀 اهداف (Targets):
-    ▫️ TP1: [عدد]
-    ▫️ TP2: [عدد]
+    🚀 اهداف سودآوری (Take Profit Targets):
+    ▫️ TP1: [عدد] 👈 (سیو سود ۵۰٪ + فری کردن معامله)
+    ▫️ TP2: [عدد] 👈 (خروج ۳۰٪ دیگر)
+    ▫️ TP3: [عدد] 👈 (کاهش نهایی پوزیشن)
 
-    🛑 حد ضرر: [عدد]
+    🛑 حد ضرر پیشنهاد شده با محاسبه نویز ATR: [عدد]
+    ❌ **شرط ابطال ستاپ (Setup Invalidation):** [اگر قیمت فلان سطح را زد قبل ورود، این ستاپ منقضی است]
 
-    ⚠️ رادار تله‌شناسی نهنگ (Whale Trap Radar):
+    🏛 تحلیل فازهای بازار و پرایس‌اکشن (Wyckoff & Price Action):
+    • فاز فعلی بازار: [تشخیص فاز انباشت/توزیع/رونددار]
+    • تحلیل نقدینگی و نهنگ‌ها: [توضیح کوتاه ۱ خطی]
+
+    ⚠️ رادار تله‌شناسی (Whale Trap Radar):
     • ریسک دیوارهای فیک: {whale_trap['spoofing_risk']}
-    • محدوده شکار نقدینگی (Stop-Hunt Zone): `{whale_trap['sweep_zone']}`
-    • استرس‌تست (اگر بیت‌کوین ۲٪ بریزد): حدود `-{whale_trap['btc_drop_impact']}%` ریزش
+    • منطقه خطر شکار حد ضرر: `{whale_trap['sweep_zone']}`
+    • استرس‌تست (افت ۲٪ بیت‌کوین): `-{whale_trap['btc_drop_impact']}%`
     """
 
     try:
@@ -357,7 +385,7 @@ async def generate_signal(symbol: str, timeframe: str):
     chart_bytes = await asyncio.to_thread(generate_custom_chart, df, formatted_symbol, timeframe)
     return response_text, chart_bytes
 
-# --- هاندرلرهای پیام‌ها ---
+# --- هاندلرهای پیام‌ها ---
 
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
@@ -513,7 +541,6 @@ async def handle_text_input(message: types.Message):
             })
             
             user["state"] = None
-            # اضافه شدن دکمه‌های شیشه‌ای در زیر پیام ثبت هشدار
             await message.answer(
                 f"✅ **هشدار قیمت با موفقیت ثبت شد!**\n\nهر زمان قیمت {symbol} به `${target_p}` برسد پیام داده خواهد شد.",
                 reply_markup=alert_success_keyboard(),
