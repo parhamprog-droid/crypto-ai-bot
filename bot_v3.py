@@ -26,9 +26,8 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "8800494482"))
 
-# تنظیم کلید و مدل فعال جمینای (gemini-1.5-flash برای جلوگیری از ارور 404)
+# تنظیم کلید اصلی جمینای
 genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel("gemini-1.5-flash")
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
@@ -47,6 +46,32 @@ def get_user(user_id: int):
             "alert_temp": {}
         }
     return user_data[user_id]
+
+# --- تابع هوشمند فراخوانی جمینای (پشتیبانی از چند مدل برای جلوگیری از ارور 404) ---
+
+async def query_gemini(prompt: str) -> str:
+    models_to_try = [
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-pro-latest",
+        "gemini-1.5-flash",
+        "gemini-1.5-pro"
+    ]
+    
+    last_error = None
+    for model_name in models_to_try:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = await asyncio.to_thread(model.generate_content, prompt)
+            if response and response.text:
+                return response.text
+        except Exception as e:
+            last_error = e
+            logging.warning(f"Model {model_name} failed, trying next... Error: {e}")
+            continue
+            
+    raise last_error or Exception("هیچ‌کدام از مدل‌های جمینای پاسخ ندادند. کلید API خود را بررسی کنید.")
 
 # --- کیبوردهای ربات ---
 
@@ -374,11 +399,7 @@ async def generate_signal(symbol: str, timeframe: str):
     """
 
     try:
-        response = await asyncio.to_thread(
-            gemini_model.generate_content,
-            prompt
-        )
-        response_text = response.text
+        response_text = await query_gemini(prompt)
     except Exception as e:
         logging.error(f"Gemini Error: {e}")
         return f"⚠️ خطایی در دریافت تحلیل از جمینای رخ داد:\n`{e}`", None
@@ -408,11 +429,8 @@ async def crypto_news_handler(message: types.Message):
 
     prompt = f"این اخبار کریپتو را خوانده و خلاصه تحلیلی به فارسی ارائه بده:\n{raw_news}"
     try:
-        response = await asyncio.to_thread(
-            gemini_model.generate_content, 
-            prompt
-        )
-        await msg.edit_text(f"📰 **خلاصه اخبار و احساسات بازار:**\n\n{response.text}", parse_mode="Markdown")
+        response_text = await query_gemini(prompt)
+        await msg.edit_text(f"📰 **خلاصه اخبار و احساسات بازار:**\n\n{response_text}", parse_mode="Markdown")
     except Exception as e:
         await msg.edit_text(f"⚠️ خطایی در تحلیل اخبار رخ داد:\n`{e}`", parse_mode="Markdown")
 
