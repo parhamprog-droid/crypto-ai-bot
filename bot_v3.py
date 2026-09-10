@@ -26,9 +26,9 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "8800494482"))
 
-# تنظیم کلید و دقیق‌ترین مدل جمینای
+# تنظیم کلید و مدل فعال جمینای (gemini-1.5-flash برای جلوگیری از ارور 404)
 genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel("gemini-1.5-pro")
+gemini_model = genai.GenerativeModel("gemini-1.5-flash")
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
@@ -48,7 +48,8 @@ def get_user(user_id: int):
         }
     return user_data[user_id]
 
-# کیبوردهای اصلی
+# --- کیبوردهای ربات ---
+
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🚀 اسکنر ارزهای پامپی"), KeyboardButton(text="🐳 رادار توکن‌های جدید (DEX)")],
@@ -82,7 +83,7 @@ def buy_vip_keyboard():
         [InlineKeyboardButton(text="💎 خرید اشتراک VIP", callback_data="buy_vip")]
     ])
 
-# --- توابع محاسباتی و داده‌های پیشرفته ---
+# --- توابع محاسباتی و دریافت داده‌ها ---
 
 async def detect_whale_traps_and_stress_test(symbol: str, df: pd.DataFrame, orderbook_data: dict):
     volatility = df['Close'].pct_change().std() * 100
@@ -93,7 +94,7 @@ async def detect_whale_traps_and_stress_test(symbol: str, df: pd.DataFrame, orde
         estimated_beta = round(volatility / 1.2, 2) if not np.isnan(volatility) else 1.5
     
     ratio = orderbook_data.get('ratio', 1.0)
-    spoofing_risk = "ریسک بالا ⚠️ (احتمال وجود دیوارهای فیک)" if ratio > 2.2 or ratio < 0.4 else "طبیعی 🟢"
+    spoofing_risk = "ریسک بالا ⚠️ (احتمال دیوارهای فیک)" if ratio > 2.2 or ratio < 0.4 else "طبیعی 🟢"
     liquidity_hunt_price = df['Low'].iloc[-10:].min()
     
     return {
@@ -385,7 +386,7 @@ async def generate_signal(symbol: str, timeframe: str):
     chart_bytes = await asyncio.to_thread(generate_custom_chart, df, formatted_symbol, timeframe)
     return response_text, chart_bytes
 
-# --- هاندلرهای پیام‌ها ---
+# --- هاندلرهای تلگرام ---
 
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
@@ -617,7 +618,7 @@ async def handle_text_input(message: types.Message):
 
     await message.answer(f"⏱ تایم‌فریم تحلیل **{symbol_text}** را انتخاب کنید:", reply_markup=timeframe_keyboard(symbol_text))
 
-# --- سرویس‌های پس‌زمینه ---
+# --- سرویس‌های پس‌زمینه و وب سرور ---
 
 async def background_alert_checker():
     while True:
