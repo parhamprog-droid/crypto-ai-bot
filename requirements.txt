@@ -1,7 +1,7 @@
-aiogram>=3.0.0
-google-genai
+aiogram
 ccxt
 aiohttp
-apscheduler
-matplotlib
 pandas
+numpy
+matplotlib
+google-generativeai
