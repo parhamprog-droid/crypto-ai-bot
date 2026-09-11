@@ -50,7 +50,6 @@ def get_user(user_id: int):
 # --- تابع فراخوانی جمینای با اولویت Gemini 3.5 و سیستم هوشمند Fallback ---
 
 async def query_gemini(prompt: str) -> str:
-    # لیست ترجیحی مدل‌ها با اولویت Gemini 3.5
     preferred_models = [
         "gemini-3.5-flash",
         "gemini-3.5-flash-lite",
@@ -60,7 +59,6 @@ async def query_gemini(prompt: str) -> str:
         "gemini-pro"
     ]
 
-    # دریافت لیست مدل‌های فعال روی API Key به صورت پویا
     dynamic_models = []
     try:
         models_list = await asyncio.to_thread(genai.list_models)
@@ -71,7 +69,6 @@ async def query_gemini(prompt: str) -> str:
     except Exception as e:
         logging.warning(f"Could not fetch dynamic models list: {e}")
 
-    # ترکیب مدل‌های ترجیحی و پویا با حفظ اولویت
     candidate_models = list(dict.fromkeys(preferred_models + dynamic_models))
 
     last_error = None
@@ -205,20 +202,47 @@ async def fetch_orderbook_and_futures(symbol="BTC/USDT"):
         await exchange.close()
         return {"bids_vol": 0, "asks_vol": 0, "ratio": 1.0, "funding_rate": 0.01, "open_interest": "نامشخص ⚪️"}
 
+# --- تابع اصلاح شده دریافت اخبار همراه با هدر و منبع پشتیبان ---
+
 async def fetch_crypto_news():
-    url = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN"
-    async with aiohttp.ClientSession() as session:
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json'
+    }
+    
+    async with aiohttp.ClientSession(headers=headers) as session:
+        # منبع اول: CryptoCompare
         try:
-            async with session.get(url, timeout=10) as resp:
+            url1 = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN"
+            async with session.get(url1, timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     articles = data.get("Data", [])[:5]
-                    news_text = ""
-                    for a in articles:
-                        news_text += f"- Title: {a.get('title')}\n  Body: {a.get('body')[:150]}...\n\n"
-                    return news_text
+                    if articles:
+                        news_text = ""
+                        for a in articles:
+                            news_text += f"- Title: {a.get('title')}\n  Body: {a.get('body')[:150]}...\n\n"
+                        return news_text
         except Exception as e:
-            logging.error(f"News Fetch Error: {e}")
+            logging.error(f"CryptoCompare News Fetch Error: {e}")
+
+        # منبع پشتیبان: CoinGecko News API
+        try:
+            url2 = "https://api.coingecko.com/api/v3/news"
+            async with session.get(url2, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    articles = data.get("data", [])[:5]
+                    if articles:
+                        news_text = ""
+                        for a in articles:
+                            title = a.get('title', '')
+                            description = a.get('description', '')[:150]
+                            news_text += f"- Title: {title}\n  Body: {description}...\n\n"
+                        return news_text
+        except Exception as e:
+            logging.error(f"CoinGecko News Fetch Error: {e}")
+
     return None
 
 async def scan_pump_candidates():
@@ -534,8 +558,6 @@ async def user_profile(message: types.Message):
     status_text = "💎 VIP" if user["is_vip"] else "👤 رایگان"
     await message.answer(f"👤 **پروفایل کاربری:**\n\n🆔 آیدی: `{message.from_user.id}`\n👑 وضعیت: {status_text}", parse_mode="Markdown")
 
-# --- هاندلر کاملاً اصلاح شده انتخاب تایم‌فریم ---
-
 @dp.callback_query(F.data.startswith("tf:"))
 async def handle_timeframe_click(callback: types.CallbackQuery):
     await callback.answer()
@@ -546,13 +568,11 @@ async def handle_timeframe_click(callback: types.CallbackQuery):
     try:
         signal_text, chart_bytes = await generate_signal(symbol, tf)
         
-        # ۱. پاک کردن امن پیام لودینگ
         try:
             await loading_msg.delete()
         except Exception:
             pass
 
-        # ۲. ارسال عکس چارت به صورت جداگانه (ارسال بدون کاپشن سنگین جهت جلوگیری از لیمیت ۱۰۲۴ کاراکتر تلگرام)
         if chart_bytes:
             photo_file = BufferedInputFile(chart_bytes, filename=f"{symbol}.png")
             try:
@@ -560,7 +580,6 @@ async def handle_timeframe_click(callback: types.CallbackQuery):
             except Exception:
                 await callback.message.answer_photo(photo=photo_file, caption=f"📊 چارت {symbol} ({tf})")
 
-        # ۳. ارسال متن تحلیل به صورت پیام مجزا همراه با سیستم ضد کرش Markdown
         if signal_text:
             try:
                 await callback.message.answer(signal_text, parse_mode="Markdown")
