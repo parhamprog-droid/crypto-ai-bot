@@ -11,46 +11,67 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-# استفاده از کتابخانه pydub برای پردازش و تبدیل فایل صوتی
 from pydub import AudioSegment
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import (
-    ReplyKeyboardMarkup, KeyboardButton, 
+    ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton,
     BufferedInputFile
 )
-import google.generativeai as genai
+from google import genai
+from google.genai import types as genai_types
 from aiohttp import web
 
-# تنظیمات لاگینگ
-logging.basicConfig(level=logging.INFO)
+# --- تنظیمات لاگینگ ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# --- خواندن امن ENV ---
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "8800494482"))
+ADMIN_ID_RAW = os.getenv("ADMIN_ID", "0")
 
-genai.configure(api_key=GEMINI_API_KEY)
+# --- اعتبارسنجی ENV ---
+if not TELEGRAM_BOT_TOKEN:
+    raise RuntimeError("❌ ENV 'TELEGRAM_BOT_TOKEN' or 'BOT_TOKEN' is not set!")
+if not GEMINI_API_KEY:
+    raise RuntimeError("❌ ENV 'GEMINI_API_KEY' is not set!")
 
+try:
+    ADMIN_ID = int(ADMIN_ID_RAW)
+except ValueError:
+    ADMIN_ID = 0
+    logging.warning(f"ADMIN_ID '{ADMIN_ID_RAW}' is not a valid integer. Using 0.")
+
+# --- کلاینت Gemini جدید ---
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+
+# --- Bot & Dispatcher ---
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
 user_data = {}
 price_alerts = []
 
-# --- دستور سیستمی سراسری برای فارسی‌سازی ---
+# --- دستور سیستمی: توضیحات فارسی، اصطلاحات انگلیسی ---
 PERSIAN_SYSTEM_INSTRUCTION = (
-    "تو یک دستیار هوشمند، تحلیل‌گر و حرفه‌ای بازار کریپتو هستی. "
-    "قانون طلایی: همیشه و در همه شرایط فقط و فقط به زبان فارسی روان، حرفه‌ای و تریدری پاسخ بده. "
-    "هرگز به انگلیسی جواب نده، مگر اینکه کاربر صراحتاً درخواست کند. "
-    "نام نمادها، اعداد، و اصطلاحات تخصصی (مثل Long، Short، TP، SL، RSI، MACD) را می‌توانی به انگلیسی نگه داری، "
-    "اما توضیحات، تحلیل و متن اصلی باید کاملاً فارسی باشد."
+    "تو یک دستیار حرفه‌ای تحلیل بازار کریپتو هستی. "
+    "قانون مهم: توضیحات، تحلیل، جملات روایی و توضیح ستاپ را فقط و فقط به زبان فارسی روان و تریدری بنویس. "
+    "اما اصطلاحات تخصصی مثل نام نمادها (BTC, ETH, SOL, BNB)، تایم‌فریم‌ها (15m, 1h, 4h, 1d)، "
+    "شاخص‌ها (RSI, MACD, EMA, ATR, FVG, Order Block, Bollinger, Volume)، "
+    "و مفاهیم ترید (Long, Short, Entry, TP, SL, Stop Loss, Take Profit, Cross, Leverage, Position) "
+    "حتماً به انگلیسی باقی بمانند. هرگز کل پاسخ را به انگلیسی نده. هرگز اصطلاحات تخصصی را به فارسی ترجمه نکن. "
+    "نمونه درست: «روند 4H صعودی است و RSI روی 65 قرار دارد. Entry مناسب در محدوده Long با SL زیر 63000.»"
 )
+
 
 def get_user(user_id: int):
     if user_id not in user_data:
-        is_admin = (user_id == ADMIN_ID)
+        is_admin = (user_id == ADMIN_ID and ADMIN_ID != 0)
         user_data[user_id] = {
             "usage_count": 0,
             "is_vip": is_admin,
@@ -62,54 +83,36 @@ def get_user(user_id: int):
         }
     return user_data[user_id]
 
-# --- فراخوانی جمینای با پشتیبان هوشمند (پایه gemini-2.0-flash) ---
-async def query_gemini(prompt: str) -> str:
-    # تزریق دستور سیستمی فارسی به تمام درخواست‌ها
-    full_prompt = f"{PERSIAN_SYSTEM_INSTRUCTION}\n\n---\n\n{prompt}"
 
+# --- فراخوانی Gemini با SDK جدید ---
+async def query_gemini(prompt: str) -> str:
     preferred_models = [
         "gemini-2.0-flash",
         "gemini-1.5-flash",
         "gemini-1.5-pro",
-        "gemini-pro"
     ]
 
-    dynamic_models = []
-    try:
-        models_list = await asyncio.to_thread(genai.list_models)
-        for m in models_list:
-            if 'generateContent' in m.supported_generation_methods:
-                clean_name = m.name.replace("models/", "")
-                dynamic_models.append(clean_name)
-    except Exception as e:
-        logging.warning(f"Dynamic models fetch failed: {e}")
-
-    candidate_models = list(dict.fromkeys(preferred_models + dynamic_models))
-
     last_error = None
-    for model_name in candidate_models:
+    for model_name in preferred_models:
         try:
-            model = genai.GenerativeModel(
-                model_name,
-                system_instruction=PERSIAN_SYSTEM_INSTRUCTION
+            response = await asyncio.to_thread(
+                gemini_client.models.generate_content,
+                model=model_name,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    system_instruction=PERSIAN_SYSTEM_INSTRUCTION,
+                    temperature=0.7,
+                ),
             )
-            response = await asyncio.to_thread(model.generate_content, prompt)
             if response and response.text:
                 return response.text
         except Exception as e:
             last_error = e
+            logging.warning(f"Gemini model '{model_name}' failed: {type(e).__name__}: {e}")
             continue
 
-    # اگر همه مدل‌ها شکست خوردند، یک بار دیگر بدون system_instruction امتحان کن
-    try:
-        model = genai.GenerativeModel("gemini-2.0-flash")
-        response = await asyncio.to_thread(model.generate_content, full_prompt)
-        if response and response.text:
-            return response.text
-    except Exception as e:
-        last_error = e
+    raise last_error or Exception("هیچ‌کدام از مدل‌های Gemini پاسخ ندادند.")
 
-    raise last_error or Exception("هیچ‌کدام از مدل‌های جمینای پاسخ ندادند.")
 
 # --- کیبوردهای تلگرام ---
 main_keyboard = ReplyKeyboardMarkup(
@@ -122,6 +125,7 @@ main_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
+
 def timeframe_keyboard(symbol: str):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -132,6 +136,7 @@ def timeframe_keyboard(symbol: str):
         ]
     ])
 
+
 def alert_success_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -140,12 +145,14 @@ def alert_success_keyboard():
         ]
     ])
 
+
 def buy_vip_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💎 دریافت VIP رایگان با دعوت دوستان", callback_data="buy_vip")]
     ])
 
-# --- توابع دریافت و پردازش داده‌های بازار ---
+
+# --- توابع داده بازار ---
 async def get_crypto_dataframe(symbol="BTC/USDT", timeframe="1h", limit=100):
     exchange = ccxt.coinex()
     try:
@@ -156,21 +163,19 @@ async def get_crypto_dataframe(symbol="BTC/USDT", timeframe="1h", limit=100):
             formatted_symbol = formatted_symbol.replace("USDT", "/USDT")
 
         ohlcv = await exchange.fetch_ohlcv(formatted_symbol, timeframe=timeframe, limit=limit)
-        await exchange.close()
-        
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        
+
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         df['RSI'] = 100 - (100 / (1 + rs))
         df['RSI'] = df['RSI'].fillna(50)
-        
+
         df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
         df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
-        
+
         exp1 = df['Close'].ewm(span=12, adjust=False).mean()
         exp2 = df['Close'].ewm(span=26, adjust=False).mean()
         df['MACD'] = exp1 - exp2
@@ -187,35 +192,44 @@ async def get_crypto_dataframe(symbol="BTC/USDT", timeframe="1h", limit=100):
 
         return formatted_symbol, df
     except Exception as e:
-        await exchange.close()
-        logging.error(f"CCXT Error ({symbol}): {e}")
+        logging.error(f"CCXT Error ({symbol}): {type(e).__name__}: {e}")
         return None, None
+    finally:
+        try:
+            await exchange.close()
+        except Exception:
+            pass
+
 
 async def fetch_orderbook_and_futures(symbol="BTC/USDT"):
     exchange = ccxt.coinex()
     try:
         formatted_symbol = symbol.upper()
         orderbook = await exchange.fetch_order_book(formatted_symbol, limit=20)
-        
+
         bids_volume = sum([b[1] for b in orderbook['bids']])
         asks_volume = sum([a[1] for a in orderbook['asks']])
         orderbook_ratio = bids_volume / asks_volume if asks_volume > 0 else 1.0
 
-        await exchange.close()
         return {
             "bids_vol": bids_volume,
             "asks_vol": asks_volume,
             "ratio": orderbook_ratio,
             "open_interest": "افزایشی 📈" if bids_volume > asks_volume else "کاهشی 📉"
         }
-    except Exception as e:
-        await exchange.close()
+    except Exception:
         return {"bids_vol": 0, "asks_vol": 0, "ratio": 1.0, "open_interest": "نامشخص ⚪️"}
+    finally:
+        try:
+            await exchange.close()
+        except Exception:
+            pass
+
 
 async def fetch_crypto_news():
     headers = {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'}
     connector = aiohttp.TCPConnector(ssl=False)
-    
+
     async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
         try:
             url1 = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN"
@@ -230,11 +244,11 @@ async def fetch_crypto_news():
 
     return "- Title: Crypto Market Volatility\n  Body: High market volatility continues across major crypto assets.\n\n"
 
+
 async def scan_pump_candidates():
     exchange = ccxt.coinex()
     try:
         tickers = await exchange.fetch_tickers()
-        await exchange.close()
         candidates = []
         for symbol, data in tickers.items():
             if symbol.endswith("/USDT"):
@@ -244,8 +258,13 @@ async def scan_pump_candidates():
                     candidates.append({'symbol': symbol, 'change': float(change), 'volume': float(volume)})
         return sorted(candidates, key=lambda x: x['change'], reverse=True)[:5]
     except Exception:
-        await exchange.close()
         return []
+    finally:
+        try:
+            await exchange.close()
+        except Exception:
+            pass
+
 
 async def fetch_dex_tokens():
     headers = {'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0'}
@@ -269,6 +288,7 @@ async def fetch_dex_tokens():
         except Exception as e:
             logging.error(f"Gecko Error: {e}")
     return [{"symbol": "BONK", "price": "0.000021"}, {"symbol": "WIF", "price": "1.84"}]
+
 
 def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
     clean_symbol = symbol.replace("/", "")
@@ -310,6 +330,7 @@ def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> byte
     buf.seek(0)
     return buf.getvalue()
 
+
 async def generate_signal(symbol: str, timeframe: str):
     formatted_symbol, df = await get_crypto_dataframe(symbol, timeframe)
     if df is None or df.empty:
@@ -343,7 +364,7 @@ async def generate_signal(symbol: str, timeframe: str):
     - روند دیلی (1D): {trend_1d}
     - روند چهارساعته (4H): {trend_4h}
     - وضعیت کلان بیت‌کوین: {"صعودی 🟢" if btc_bullish else "نزولی 🔴"}
-    
+
     داده‌های فنی و ICT:
     - قیمت فعلی: {price} | ATR (نویز بازار): {atr_val}
     - وضعیت نوسان (Bollinger Squeeze): {squeeze_status}
@@ -374,83 +395,77 @@ async def generate_signal(symbol: str, timeframe: str):
     • تحلیل FVG و اوردربلاک: [۱ خط]
     • رادار تله نهنگ: [۱ خط]
 
-    ⚠️ یادآوری مهم: کل پاسخ را فقط و فقط به زبان فارسی روان، حرفه‌ای و تریدری بنویس. از هیچ کلمه انگلیسی به جز نام نمادها، اعداد و اصطلاحات تخصصی (مثل Long/Short/TP/SL) استفاده نکن.
+    ⚠️ یادآوری: توضیحات، جملات و متن تحلیل را فارسی بنویس،
+    اما نام ارز، تایم‌فریم، اصطلاحات تکنیکال (RSI, MACD, EMA, ATR, FVG, OB, Bollinger)،
+    و مفاهیم ترید (Long, Short, Entry, TP, SL, Cross, Leverage) را حتماً انگلیسی نگه دار.
     """
 
     try:
         response_text = await query_gemini(prompt)
     except Exception as e:
-        return f"⚠️ خطا در تحلیل جمینای:\n`{e}`", None
+        return f"⚠️ خطا در تحلیل Gemini:\n`{e}`", None
 
     chart_bytes = await asyncio.to_thread(generate_custom_chart, df, formatted_symbol, timeframe)
     return response_text, chart_bytes
 
-# --- هاندلر پردازش پیام صوتی با کتابخانه pydub و Gemini 2.0 Flash ---
+
+# --- پردازش پیام صوتی ---
 @dp.message(F.voice)
 async def handle_voice_message(message: types.Message):
     msg = await message.answer("🎙 در حال تبدیل و تحلیل ویس توسط هوش مصنوعی...")
     file_id = message.voice.file_id
-    
+
     ogg_filename = f"voice_{message.message_id}_{message.from_user.id}.ogg"
     wav_filename = f"voice_{message.message_id}_{message.from_user.id}.wav"
 
     try:
-        # ۱. دانلود فایل صوتی از تلگرام
         file = await bot.get_file(file_id)
         await bot.download_file(file.file_path, destination=ogg_filename)
 
-        # ۲. تبدیل فرمت ogg به wav استاندارد با کتابخانه pydub
         sound = AudioSegment.from_file(ogg_filename, format="ogg")
         sound.export(wav_filename, format="wav")
 
-        # ۳. آپلود فایل WAV به جمینای
-        audio_file = await asyncio.to_thread(
-            genai.upload_file, 
-            path=wav_filename, 
-            mime_type="audio/wav"
-        )
+        def _upload_and_analyze():
+            uploaded = gemini_client.files.upload(file=wav_filename)
+            prompt = (
+                "این یک فایل صوتی از کاربر در مورد بازار کریپتو و ارزهای دیجیتال است. "
+                "متن صحبت او را متوجه شو، سوال یا درخواست او را بررسی کن و یک پاسخ جامع، تحلیلی و حرفه‌ای ارائه بده.\n\n"
+                "⚠️ توضیحات را فارسی بنویس، اما نام ارزها، اصطلاحات تکنیکال و مفاهیم ترید را انگلیسی نگه دار. "
+                "اگر کاربر انگلیسی حرف زد، تو باز به فارسی (با اصطلاحات انگلیسی) جواب بده."
+            )
+            resp = gemini_client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=[uploaded, prompt],
+                config=genai_types.GenerateContentConfig(
+                    system_instruction=PERSIAN_SYSTEM_INSTRUCTION,
+                ),
+            )
+            try:
+                gemini_client.files.delete(name=uploaded.name)
+            except Exception:
+                pass
+            return resp.text if resp else None
 
-        prompt = (
-            "این یک فایل صوتی از کاربر در مورد بازار کریپتو و ارزهای دیجیتال است. "
-            "متن صحبت او را متوجه شو، سوال یا درخواست او را بررسی کن و یک پاسخ جامع، تحلیلی و حرفه‌ای ارائه بده.\n\n"
-            "⚠️ مهم: کل پاسخ را فقط و فقط به زبان فارسی روان، حرفه‌ای و تریدری بنویس. "
-            "حتی اگر کاربر به انگلیسی یا زبان دیگری صحبت کرد، تو باید به فارسی جواب بدهی."
-        )
+        response_text = await asyncio.to_thread(_upload_and_analyze)
 
-        # ۴. پردازش دقیقاً با Gemini 2.0 Flash + system_instruction فارسی
-        model = genai.GenerativeModel(
-            "gemini-2.0-flash",
-            system_instruction=PERSIAN_SYSTEM_INSTRUCTION
-        )
-        response = await asyncio.to_thread(
-            model.generate_content,
-            [audio_file, prompt]
-        )
-
-        # ۵. پاک‌سازی فایل صوتی از جمینای و دیسک
-        try:
-            await asyncio.to_thread(genai.delete_file, audio_file.name)
-        except Exception:
-            pass
-
-        for path in [ogg_filename, wav_filename]:
-            if os.path.exists(path):
-                os.remove(path)
-
-        # ۶. ارسال پاسخ
-        if response and response.text:
-            await msg.edit_text(f"🗣 **پاسخ دستیار صوتی:**\n\n{response.text}", parse_mode="Markdown")
+        if response_text:
+            await msg.edit_text(f"🗣 **پاسخ دستیار صوتی:**\n\n{response_text}", parse_mode="Markdown")
         else:
             await msg.edit_text("⚠️ متأسفانه متنی از فایل صوتی تشخیص داده نشد.")
 
     except Exception as e:
-        logging.error(f"Voice handling error: {e}")
+        logging.error(f"Voice handling error: {type(e).__name__}: {e}")
+        await msg.edit_text(f"⚠️ خطا در پردازش فایل صوتی:\n`{e}`", parse_mode="Markdown")
+    finally:
         for path in [ogg_filename, wav_filename]:
-            if os.path.exists(path):
-                os.remove(path)
-        await msg.edit_text(f"⚠️ متأسفانه در پردازش فایل صوتی خطایی رخ داد:\n`{e}`", parse_mode="Markdown")
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
 
-# --- دستور استارت (شیک و حرفه‌ای) ---
+
+# --- دستور استارت ---
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     user_id = message.from_user.id
@@ -469,8 +484,8 @@ async def start_cmd(message: types.Message):
                     referrer["is_vip"] = True
                     try:
                         await bot.send_message(referrer_id, "🎉 **تبریک!** ۳ کاربر جدید دعوت کردید و حساب شما **VIP** شد!")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logging.warning(f"Failed to notify referrer: {e}")
 
     bot_info = await bot.get_me()
     ref_link = f"https://t.me/{bot_info.username}?start={user_id}"
@@ -490,11 +505,8 @@ async def start_cmd(message: types.Message):
         f"👥 دعوت‌های فعال: **{len(user['referrals'])} از ۳**"
     )
 
-    await message.answer(
-        start_text,
-        reply_markup=main_keyboard,
-        parse_mode="Markdown"
-    )
+    await message.answer(start_text, reply_markup=main_keyboard, parse_mode="Markdown")
+
 
 @dp.message(F.text == "👥 سیستم دعوت و هدیه")
 async def referral_info_handler(message: types.Message):
@@ -508,9 +520,10 @@ async def referral_info_handler(message: types.Message):
         f"لینک اختصاصی شما:\n`{ref_link}`\n\n"
         f"📊 وضعیت شما:\n"
         f"• تعداد دعوت‌شده‌ها: **{len(user['referrals'])} از ۳ نفر**\n"
-        f"• وضعیت VIP: {'🟢 فعال' if user['is_vip'] else '🔴 غیرفعال (با ۳ دعوت فعال می‌شود)'}",
+        f"• وضعیت VIP: {'🟢 فعال' if user['is_vip'] else '🔴 غیرفعال'}",
         parse_mode="Markdown"
     )
+
 
 @dp.message(F.text == "📰 اخبار و تحلیل احساسات")
 async def crypto_news_handler(message: types.Message):
@@ -519,20 +532,22 @@ async def crypto_news_handler(message: types.Message):
 
     prompt = (
         f"این اخبار کریپتو را تحلیلی و ساختاریافته خلاصه کن:\n{raw_news}\n\n"
-        "⚠️ پاسخ را فقط و فقط به زبان فارسی روان، حرفه‌ای و تریدری بنویس. "
-        "از هیچ کلمه انگلیسی استفاده نکن به جز نام ارزها و اصطلاحات تخصصی."
+        "⚠️ توضیحات و تحلیل را فارسی بنویس، اما نام ارزها (BTC, ETH)، "
+        "اصطلاحات (ETF, DeFi, Whale, Halving, Market Cap) را انگلیسی نگه دار."
     )
     try:
         response_text = await query_gemini(prompt)
-        await msg.edit_text(f"📰 **خلاصه اخبار و احساسات بازار:**\n\n{response_text}", parse_mode="Markdown")
+        await msg.edit_text(f"📰 **خلاصه اخبار:**\n\n{response_text}", parse_mode="Markdown")
     except Exception:
         await msg.edit_text(f"📰 خلاصه اخبار:\n\n{raw_news[:1000]}")
+
 
 @dp.message(F.text == "🔔 هشدار قیمت")
 async def start_price_alert(message: types.Message):
     user = get_user(message.from_user.id)
     user["state"] = "awaiting_alert_symbol"
     await message.answer("🔔 **تنظیم هشدار قیمت**\n\nلطفاً **نام ارز** را وارد کنید (مثال: BTC یا ETH):")
+
 
 @dp.callback_query(F.data == "new_alert")
 async def callback_new_alert(callback: types.CallbackQuery):
@@ -541,52 +556,56 @@ async def callback_new_alert(callback: types.CallbackQuery):
     user["state"] = "awaiting_alert_symbol"
     await callback.message.answer("🔔 نام ارز را وارد کنید:")
 
+
 @dp.callback_query(F.data == "my_alerts")
 async def callback_my_alerts(callback: types.CallbackQuery):
     await callback.answer()
     user_id = callback.from_user.id
     user_alerts = [a for a in price_alerts if a['user_id'] == user_id]
-    
+
     if not user_alerts:
         await callback.message.answer("📋 هیچ هشدار فعالی ندارید.")
         return
-        
+
     text = "📋 **هشدارهای فعال شما:**\n\n"
     for i, a in enumerate(user_alerts, 1):
         text += f"{i}. ارز: **{a['symbol']}** | قیمت هدف: `${a['target_price']}`\n"
     await callback.message.answer(text, parse_mode="Markdown")
 
+
 @dp.message(F.text == "🚀 اسکنر ارزهای پامپی")
 async def pump_scanner_handler(message: types.Message):
     user = get_user(message.from_user.id)
     if not user["is_vip"]:
-        await message.answer("🔒 مخصوص کاربران VIP (برای فعال‌سازی ۳ نفر را دعوت کنید).", reply_markup=buy_vip_keyboard())
+        await message.answer("🔒 مخصوص VIP", reply_markup=buy_vip_keyboard())
         return
 
-    msg = await message.answer("🔍 در حال اسکن بازار...")
+    msg = await message.answer("🔍 در حال اسکن...")
     candidates = await scan_pump_candidates()
     if not candidates:
         await msg.edit_text("⚠️ ارزی یافت نشد.")
         return
-    
+
     text = "🔥 **ارزهای مستعد پامپ:**\n\n"
     for c in candidates:
         text += f"📌 **#{c['symbol'].replace('/', '')}** | رشد: `+{c['change']:.2f}%`\n"
     await msg.edit_text(text, parse_mode="Markdown")
 
+
 @dp.message(F.text == "🐳 رادار توکن‌های جدید (DEX)")
 async def dex_radar_handler(message: types.Message):
     user = get_user(message.from_user.id)
     if not user["is_vip"]:
-        await message.answer("🔒 مخصوص کاربران VIP (برای فعال‌سازی ۳ نفر را دعوت کنید).", reply_markup=buy_vip_keyboard())
+        await message.answer("🔒 مخصوص VIP", reply_markup=buy_vip_keyboard())
         return
 
-    msg = await message.answer("🔎 در حال رصد توکن‌های DEX...")
+    msg = await message.answer("🔎 در حال رصد...")
     tokens = await fetch_dex_tokens()
     text = "🐳 **توکن‌های ترند DEX:**\n\n"
     for t in tokens:
         text += f"🪙 **{t['symbol']}** | قیمت: `${t['price']}`\n"
     await msg.edit_text(text, parse_mode="Markdown")
+
 
 @dp.message(F.text == "📊 شاخص ترس و طمع")
 async def fear_and_greed(message: types.Message):
@@ -597,26 +616,33 @@ async def fear_and_greed(message: types.Message):
                 item = data["data"][0]
                 await message.answer(f"📊 **شاخص ترس و طمع:**\n\n🎯 عدد: **{item['value']}/100**\n📌 وضعیت: **{item['value_classification']}**")
 
+
 @dp.message(F.text == "🧮 محاسبه ریسک")
 async def start_risk_calc(message: types.Message):
     user = get_user(message.from_user.id)
     user["state"] = "awaiting_capital"
     user["risk_calc_data"] = {}
-    await message.answer("🧮 **محاسبه مدیریت ریسک**\n\nموجودی کل حساب (به دلار) را وارد کنید:")
+    await message.answer("🧮 **محاسبه مدیریت ریسک**\n\nموجودی کل حساب (دلار):")
+
 
 @dp.message(F.text == "👤 حساب کاربری")
 async def user_profile(message: types.Message):
     user = get_user(message.from_user.id)
     status_text = "💎 VIP" if user["is_vip"] else "👤 رایگان"
-    await message.answer(f"👤 **پروفایل کاربری:**\n\n🆔 آیدی: `{message.from_user.id}`\n👑 وضعیت: {status_text}\n👥 تعداد دعوت‌ها: **{len(user['referrals'])}**", parse_mode="Markdown")
+    await message.answer(
+        f"👤 **پروفایل کاربری:**\n\n🆔 آیدی: `{message.from_user.id}`\n"
+        f"👑 وضعیت: {status_text}\n👥 تعداد دعوت‌ها: **{len(user['referrals'])}**",
+        parse_mode="Markdown"
+    )
+
 
 @dp.callback_query(F.data.startswith("tf:"))
 async def handle_timeframe_click(callback: types.CallbackQuery):
     await callback.answer()
     _, symbol, tf = callback.data.split(":")
-    
+
     loading_msg = await callback.message.answer(f"🔄 در حال پردازش موتور تحلیل **{symbol}**...")
-    
+
     try:
         signal_text, chart_bytes = await generate_signal(symbol, tf)
         try:
@@ -636,10 +662,11 @@ async def handle_timeframe_click(callback: types.CallbackQuery):
                 await callback.message.answer(signal_text, parse_mode="Markdown")
             except Exception:
                 await callback.message.answer(signal_text)
-            
+
     except Exception as e:
-        logging.error(f"Callback Error: {e}")
-        await callback.message.answer(f"⚠️ خطایی در اجرای تحلیل رخ داد:\n{e}")
+        logging.error(f"Callback Error: {type(e).__name__}: {e}")
+        await callback.message.answer(f"⚠️ خطا:\n{e}")
+
 
 @dp.message(F.text)
 async def handle_text_input(message: types.Message):
@@ -653,28 +680,37 @@ async def handle_text_input(message: types.Message):
             formatted += "/USDT"
         user["alert_temp"]["symbol"] = formatted
         user["state"] = "awaiting_alert_price"
-        await message.answer(f"قیمت مد نظر برای **{formatted}** (به دلار) را وارد کنید:")
+        await message.answer(f"قیمت مد نظر برای **{formatted}** (دلار) را وارد کنید:")
         return
 
     elif state == "awaiting_alert_price":
         try:
             target_p = float(text)
             symbol = user["alert_temp"]["symbol"]
-            
+
             exchange = ccxt.coinex()
-            ticker = await exchange.fetch_ticker(symbol)
-            await exchange.close()
-            current_p = ticker['close']
-            
+            try:
+                ticker = await exchange.fetch_ticker(symbol)
+                current_p = ticker['last'] if 'last' in ticker else ticker['close']
+            finally:
+                try:
+                    await exchange.close()
+                except Exception:
+                    pass
+
             price_alerts.append({
                 "user_id": message.from_user.id,
                 "symbol": symbol,
                 "target_price": target_p,
                 "condition": "above" if target_p > current_p else "below"
             })
-            
+
             user["state"] = None
-            await message.answer(f"✅ **هشدار قیمت ثبت شد!**\nارز: {symbol} | هدف: `${target_p}`", reply_markup=alert_success_keyboard(), parse_mode="Markdown")
+            await message.answer(
+                f"✅ **هشدار قیمت ثبت شد!**\nارز: {symbol} | هدف: `${target_p}`",
+                reply_markup=alert_success_keyboard(),
+                parse_mode="Markdown"
+            )
         except Exception:
             await message.answer("⚠️ قیمت نامعتبر است.")
         return
@@ -683,7 +719,7 @@ async def handle_text_input(message: types.Message):
         try:
             user["risk_calc_data"]["capital"] = float(text)
             user["state"] = "awaiting_risk_pct"
-            await message.answer("درصد ریسک در معامله (مثلاً 1 یا 2) را وارد کنید:")
+            await message.answer("درصد ریسک (مثلاً 1 یا 2):")
         except ValueError:
             await message.answer("لطفاً عدد وارد کنید.")
         return
@@ -729,74 +765,86 @@ async def handle_text_input(message: types.Message):
         return
 
     symbol_text = text.upper()
-    if symbol_text.startswith("/") or symbol_text in ["🚀 اسکنر ارزهای پامپی", "🐳 رادار توکن‌های جدید (DEX)", "📊 شاخص ترس و طمع", "🧮 محاسبه ریسک", "👤 حساب کاربری", "🔔 هشدار قیمت", "📰 اخبار و تحلیل احساسات", "👥 سیستم دعوت و هدیه"]:
+    if symbol_text.startswith("/") or symbol_text in [
+        "🚀 اسکنر ارزهای پامپی", "🐳 رادار توکن‌های جدید (DEX)",
+        "📊 شاخص ترس و طمع", "🧮 محاسبه ریسک", "👤 حساب کاربری",
+        "🔔 هشدار قیمت", "📰 اخبار و تحلیل احساسات", "👥 سیستم دعوت و هدیه"
+    ]:
         return
 
     await message.answer(f"⏱ تایم‌فریم تحلیل **{symbol_text}** را انتخاب کنید:", reply_markup=timeframe_keyboard(symbol_text))
 
-# --- رادار هوشمند پیش‌بینی پامپ و دامپ ---
+
+# --- رادار پامپ/دامپ ---
 async def pump_dump_detector_loop():
-    exchange = ccxt.coinex()
-    tracked_symbols = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT', 'ADA/USDT', 'AVAX/USDT', 'LINK/USDT', 'SUI/USDT', 'PEPE/USDT']
+    tracked_symbols = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT',
+                       'ADA/USDT', 'AVAX/USDT', 'LINK/USDT', 'SUI/USDT', 'PEPE/USDT']
     last_alerts = {}
 
     while True:
         try:
             await asyncio.sleep(60)
             now_ts = datetime.datetime.now().timestamp()
+            exchange = ccxt.coinex()
 
-            for symbol in tracked_symbols:
-                try:
-                    ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=21)
-                    if len(ohlcv) < 21:
-                        continue
-
-                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
-                    last_candle = df.iloc[-1]
-                    prev_candles = df.iloc[:-1]
-                    
-                    avg_vol = prev_candles['Volume'].mean()
-                    current_vol = last_candle['Volume']
-                    price_change_pct = ((last_candle['Close'] - last_candle['Open']) / last_candle['Open']) * 100
-
-                    is_volume_spike = (current_vol >= avg_vol * 4) and (avg_vol > 0)
-                    
-                    alert_type = None
-                    if is_volume_spike and price_change_pct >= 1.2:
-                        alert_type = "🚀 پامپ احتمالی (Pump Alert)"
-                    elif is_volume_spike and price_change_pct <= -1.2:
-                        alert_type = "🩸 دامپ احتمالی (Dump Alert)"
-
-                    if alert_type:
-                        if symbol in last_alerts and (now_ts - last_alerts[symbol]) < 600:
+            try:
+                for symbol in tracked_symbols:
+                    try:
+                        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=21)
+                        if len(ohlcv) < 21:
                             continue
-                        
-                        last_alerts[symbol] = now_ts
-                        clean_sym = symbol.replace('/', '')
-                        alert_msg = (
-                            f"🚨 **هشدار هوشمند رادار بازار!**\n\n"
-                            f"🪙 **نماد:** #{clean_sym}\n"
-                            f"📊 **نوع هشدار:** {alert_type}\n"
-                            f"📈 **تغییر قیمت ۵ دقیقه:** `{price_change_pct:+.2f}%`\n"
-                            f"⚡️ **جهش حجم:** `{current_vol/avg_vol:.1f}X` برابر میانگین!\n"
-                            f"💵 **قیمت فعلی:** `${last_candle['Close']}`\n\n"
-                            f"💡 *پیش از ورود حتماً تحلیل چند تایم‌فریمی ارز را بررسی کنید.*"
-                        )
 
-                        for u_id, u_info in list(user_data.items()):
-                            if u_info.get("is_vip", False):
-                                try:
-                                    await bot.send_message(u_id, alert_msg, parse_mode="Markdown")
-                                    await asyncio.sleep(0.05)
-                                except Exception:
-                                    pass
-                except Exception as e:
-                    logging.error(f"Error checking {symbol}: {e}")
+                        df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+                        last_candle = df.iloc[-1]
+                        prev_candles = df.iloc[:-1]
+
+                        avg_vol = prev_candles['Volume'].mean()
+                        current_vol = last_candle['Volume']
+                        price_change_pct = ((last_candle['Close'] - last_candle['Open']) / last_candle['Open']) * 100
+
+                        is_volume_spike = (current_vol >= avg_vol * 4) and (avg_vol > 0)
+
+                        alert_type = None
+                        if is_volume_spike and price_change_pct >= 1.2:
+                            alert_type = "🚀 پامپ احتمالی (Pump Alert)"
+                        elif is_volume_spike and price_change_pct <= -1.2:
+                            alert_type = "🩸 دامپ احتمالی (Dump Alert)"
+
+                        if alert_type:
+                            if symbol in last_alerts and (now_ts - last_alerts[symbol]) < 600:
+                                continue
+
+                            last_alerts[symbol] = now_ts
+                            clean_sym = symbol.replace('/', '')
+                            alert_msg = (
+                                f"🚨 **هشدار هوشمند رادار بازار!**\n\n"
+                                f"🪙 **نماد:** #{clean_sym}\n"
+                                f"📊 **نوع هشدار:** {alert_type}\n"
+                                f"📈 **تغییر قیمت ۵ دقیقه:** `{price_change_pct:+.2f}%`\n"
+                                f"⚡️ **جهش حجم:** `{current_vol/avg_vol:.1f}X` برابر میانگین!\n"
+                                f"💵 **قیمت فعلی:** `${last_candle['Close']}`"
+                            )
+
+                            for u_id, u_info in list(user_data.items()):
+                                if u_info.get("is_vip", False):
+                                    try:
+                                        await bot.send_message(u_id, alert_msg, parse_mode="Markdown")
+                                        await asyncio.sleep(0.05)
+                                    except Exception:
+                                        pass
+                    except Exception as e:
+                        logging.error(f"Error checking {symbol}: {e}")
+            finally:
+                try:
+                    await exchange.close()
+                except Exception:
+                    pass
 
         except Exception as e:
-            logging.error(f"Pump/Dump Loop Error: {e}")
+            logging.error(f"Pump/Dump Loop Error: {type(e).__name__}: {e}")
 
-# --- بولتن روزانه خودکار ---
+
+# --- بولتن روزانه ---
 async def generate_daily_digest():
     fng_val, fng_class = "N/A", "N/A"
     try:
@@ -815,8 +863,8 @@ async def generate_daily_digest():
 
     raw_news = await fetch_crypto_news()
     prompt = (
-        f"یک خلاصه بسیار کوتاه و جذاب (حداکثر ۳ سطر) از مهم‌ترین اخبار کریپتو ارائه بده:\n{raw_news}\n\n"
-        "⚠️ فقط و فقط به زبان فارسی روان بنویس."
+        f"یک خلاصه بسیار کوتاه (حداکثر ۳ سطر) از مهم‌ترین اخبار کریپتو ارائه بده:\n{raw_news}\n\n"
+        "⚠️ توضیحات را فارسی بنویس، اما نام ارزها و اصطلاحات (ETF, DeFi, Whale, Halving) را انگلیسی نگه دار."
     )
     try:
         news_summary = await query_gemini(prompt)
@@ -825,11 +873,12 @@ async def generate_daily_digest():
 
     return (
         f"☀️ **بولتن تحلیلی روزانه AlphaEngine**\n\n"
-        f"🪙 **بیت‌کوین (BTC):** `${btc_price:,.2f}` (`{btc_change:+.2f}%`)\n"
+        f"🪙 **BTC:** `${btc_price:,.2f}` (`{btc_change:+.2f}%`)\n"
         f"📊 **شاخص ترس و طمع:** {fng_val}/100 ({fng_class})\n\n"
         f"📰 **خلاصه اخبار:**\n{news_summary}\n\n"
         f"💡 برای تحلیل کامل، نام ارز یا ویس خود را بفرستید."
     )
+
 
 async def daily_digest_scheduler():
     while True:
@@ -845,6 +894,7 @@ async def daily_digest_scheduler():
                     logging.warning(f"Failed to send digest to {u_id}: {e}")
             await asyncio.sleep(300)
 
+
 async def background_alert_checker():
     while True:
         try:
@@ -853,34 +903,41 @@ async def background_alert_checker():
                 continue
 
             exchange = ccxt.coinex()
-            for alert in price_alerts[:]:
-                symbol = alert['symbol']
-                target = alert['target_price']
-                condition = alert['condition']
+            try:
+                for alert in price_alerts[:]:
+                    symbol = alert['symbol']
+                    target = alert['target_price']
+                    condition = alert['condition']
 
+                    try:
+                        ticker = await exchange.fetch_ticker(symbol)
+                        current_price = ticker.get('last') or ticker.get('close')
+
+                        if (condition == "above" and current_price >= target) or (condition == "below" and current_price <= target):
+                            await bot.send_message(
+                                chat_id=alert['user_id'],
+                                text=f"🚨 **هشدار قیمت رسید!**\n\n🪙 ارز: **{symbol}**\n🎯 هدف: `${target}`\n💵 فعلی: `${current_price}`",
+                                parse_mode="Markdown"
+                            )
+                            price_alerts.remove(alert)
+                    except Exception as e:
+                        logging.error(f"Alert Check Error: {type(e).__name__}: {e}")
+            finally:
                 try:
-                    ticker = await exchange.fetch_ticker(symbol)
-                    current_price = ticker['close']
-
-                    if (condition == "above" and current_price >= target) or (condition == "below" and current_price <= target):
-                        await bot.send_message(
-                            chat_id=alert['user_id'],
-                            text=f"🚨 **هشدار قیمت رسید!**\n\n🪙 ارز: **{symbol}**\n🎯 قیمت هدف: `${target}`\n💵 قیمت فعلی: `${current_price}`",
-                            parse_mode="Markdown"
-                        )
-                        price_alerts.remove(alert)
-                except Exception as e:
-                    logging.error(f"Alert Check Error: {e}")
-
-            await exchange.close()
+                    await exchange.close()
+                except Exception:
+                    pass
         except Exception as e:
-            logging.error(f"Alert Loop Error: {e}")
+            logging.error(f"Alert Loop Error: {type(e).__name__}: {e}")
+
 
 async def handle_web(request):
     return web.Response(text="AlphaEngine Pro Active!")
 
+
 app = web.Application()
 app.router.add_get('/', handle_web)
+
 
 async def main():
     runner = web.AppRunner(app)
@@ -888,12 +945,13 @@ async def main():
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    
+
     asyncio.create_task(background_alert_checker())
     asyncio.create_task(daily_digest_scheduler())
     asyncio.create_task(pump_dump_detector_loop())
-    
+
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
