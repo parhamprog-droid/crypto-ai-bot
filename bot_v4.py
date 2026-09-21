@@ -64,7 +64,13 @@ PERSIAN_SYSTEM_INSTRUCTION = (
     "شاخص‌ها (RSI, MACD, EMA, ATR, FVG, Order Block, Bollinger, Volume)، "
     "و مفاهیم ترید (Long, Short, Entry, TP, SL, Stop Loss, Take Profit, Cross, Leverage, Position) "
     "حتماً به انگلیسی باقی بمانند. هرگز کل پاسخ را به انگلیسی نده. هرگز اصطلاحات تخصصی را به فارسی ترجمه نکن. "
-    "نمونه درست: «روند 4H صعودی است و RSI روی 65 قرار دارد. Entry مناسب در محدوده Long با SL زیر 63000.»"
+    "نمونه درست: «روند 4H صعودی است و RSI روی 65 قرار دارد. Entry مناسب در محدوده Long با SL زیر 63000.»\n\n"
+    "⚠️ قوانین املایی و نگارشی:\n"
+    "۱. املای کلمات فارسی را دقیق رعایت کن (مثلاً «قیمت» نه «قمت»، «معامله» نه «معامله»).\n"
+    "۲. هرگز از هشتگ (#) قبل از نام نمادها استفاده نکن — فقط اسم نماد را بنویس مثل SOLUSDT.\n"
+    "۳. ابتدای هر تحلیل، حتماً با ایموجی ⚡️ شروع کن.\n"
+    "۴. اعداد قیمت را با دقت و فرمت استاندارد بنویس (مثل 121.50 نه 121,500).\n"
+    "۵. اگر عدد قیمت خیلی بزرگه از کاما استفاده کن (مثل 121,500)."
 )
 
 # --- لیست داینامیک مدل‌های Gemini ---
@@ -81,6 +87,7 @@ async def get_available_models():
         "gemini-2.5-flash",
         "gemini-2.5-pro",
         "gemini-2.0-flash",
+        "gemini-1.5-flash",
         "gemini-2.0-flash-lite",
     ]
     try:
@@ -146,7 +153,6 @@ async def query_gemini(prompt: str) -> str:
             err_str = str(e)
             last_error = e
             logging.warning(f"Gemini model '{model_name}' failed: {type(e).__name__}: {err_str[:200]}")
-            # اگه ارور 404 بود، مدل رو از کش حذف کن
             if "404" in err_str or "NOT_FOUND" in err_str:
                 global _AVAILABLE_GEMINI_MODELS
                 if _AVAILABLE_GEMINI_MODELS and model_name in _AVAILABLE_GEMINI_MODELS:
@@ -413,6 +419,9 @@ async def generate_signal(symbol: str, timeframe: str):
     df['ATR'] = df['TR'].rolling(window=14).mean()
     atr_val = round(float(df['ATR'].iloc[-1]), 4)
 
+    atr_for_sl = round(atr_val * 1.5, 4)
+    atr_sl_max = round(atr_val * 3, 4)
+
     is_squeeze = df['BB_Width'].iloc[-1] < df['BB_Width'].rolling(30).mean().iloc[-1] * 0.7
     squeeze_status = "⚠️ فشرده‌سازی نوسان (آماده‌باش انفجار قیمت 🔥)" if is_squeeze else "عادی 🟢"
 
@@ -431,7 +440,8 @@ async def generate_signal(symbol: str, timeframe: str):
     - وضعیت کلان بیت‌کوین: {"صعودی 🟢" if btc_bullish else "نزولی 🔴"}
 
     داده‌های فنی و ICT:
-    - قیمت فعلی: {price} | ATR (نویز بازار): {atr_val}
+    - قیمت فعلی: {price} | ATR: {atr_val}
+    - محدوده مجاز SL بر اساس ATR: حداقل {atr_for_sl} و حداکثر {atr_sl_max} فاصله از Entry
     - وضعیت نوسان (Bollinger Squeeze): {squeeze_status}
     - FVG خریداران: {has_fvg} | Order Block: {has_ob}
     - نسبت سفارشات خرید/فروش: {ob_data['ratio']:.2f} | RSI: {rsi:.2f}
@@ -439,7 +449,7 @@ async def generate_signal(symbol: str, timeframe: str):
     فرمت خروجی دقیقاً طبق ساختار زیر باشد:
 
     ⚡️ AlphaEngine Institutional Multi-TF Setup
-    📊 نماد: #{formatted_symbol.replace('/', '')} | تایم‌فریم: {timeframe}
+    📊 نماد: {formatted_symbol.replace('/', '')} | تایم‌فریم: {timeframe}
     🌐 همگرایی روندها: 1D: {trend_1d} | 4H: {trend_4h}
     🌀 وضعیت نوسان: {squeeze_status}
 
@@ -460,9 +470,16 @@ async def generate_signal(symbol: str, timeframe: str):
     • تحلیل FVG و اوردربلاک: [۱ خط]
     • رادار تله نهنگ: [۱ خط]
 
-    ⚠️ یادآوری: توضیحات، جملات و متن تحلیل را فارسی بنویس،
-    اما نام ارز، تایم‌فریم، اصطلاحات تکنیکال (RSI, MACD, EMA, ATR, FVG, OB, Bollinger)،
-    و مفاهیم ترید (Long, Short, Entry, TP, SL, Cross, Leverage) را حتماً انگلیسی نگه دار.
+    ⚠️ یادآوری نهایی:
+    - توضیحات، جملات و متن تحلیل را فارسی روان و تریدری بنویس.
+    - نام ارز، تایم‌فریم، اصطلاحات تکنیکال (RSI, MACD, EMA, ATR, FVG, OB, Bollinger)،
+      و مفاهیم ترید (Long, Short, Entry, TP, SL, Cross, Leverage) را حتماً انگلیسی نگه دار.
+    - ابتدای پاسخ را با ⚡️ شروع کن (نه با AlphaEngine).
+    - هرگز از # قبل از نام نماد استفاده نکن. فقط بنویس: نماد: SOLUSDT
+    - املای فارسی را دقیق رعایت کن (مثلاً «قیمت» نه «قمت»).
+    - Stop Loss را منطقی و نزدیک به ATR تعیین کن — نه خیلی دور و نه خیلی نزدیک.
+      قاعده: SL باید حداقل 1.5×ATR و حداکثر 3×ATR از Entry فاصله داشته باشد.
+    - Entry Zone باید حداکثر 2٪ از قیمت فعلی فاصله داشته باشد.
     """
 
     try:
@@ -499,8 +516,7 @@ async def handle_voice_message(message: types.Message):
                 "اگر کاربر انگلیسی حرف زد، تو باز به فارسی (با اصطلاحات انگلیسی) جواب بده."
             )
 
-            # استفاده از همون مدل در دسترس
-            models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro"]
+            models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-pro"]
             last_exc = None
             for m_name in models_to_try:
                 try:
@@ -611,7 +627,8 @@ async def crypto_news_handler(message: types.Message):
     prompt = (
         f"این اخبار کریپتو را تحلیلی و ساختاریافته خلاصه کن:\n{raw_news}\n\n"
         "⚠️ توضیحات و تحلیل را فارسی بنویس، اما نام ارزها (BTC, ETH)، "
-        "اصطلاحات (ETF, DeFi, Whale, Halving, Market Cap) را انگلیسی نگه دار."
+        "اصطلاحات (ETF, DeFi, Whale, Halving, Market Cap) را انگلیسی نگه دار. "
+        "املای فارسی را دقیق رعایت کن."
     )
     try:
         response_text = await query_gemini(prompt)
@@ -666,7 +683,7 @@ async def pump_scanner_handler(message: types.Message):
 
     text = "🔥 **ارزهای مستعد پامپ:**\n\n"
     for c in candidates:
-        text += f"📌 **#{c['symbol'].replace('/', '')}** | رشد: `+{c['change']:.2f}%`\n"
+        text += f"📌 **{c['symbol'].replace('/', '')}** | رشد: `+{c['change']:.2f}%`\n"
     await msg.edit_text(text, parse_mode="Markdown")
 
 
@@ -917,7 +934,7 @@ async def pump_dump_detector_loop():
                             clean_sym = symbol.replace('/', '')
                             alert_msg = (
                                 f"🚨 **هشدار هوشمند رادار بازار!**\n\n"
-                                f"🪙 **نماد:** #{clean_sym}\n"
+                                f"🪙 **نماد:** {clean_sym}\n"
                                 f"📊 **نوع هشدار:** {alert_type}\n"
                                 f"📈 **تغییر قیمت ۵ دقیقه:** `{price_change_pct:+.2f}%`\n"
                                 f"⚡️ **جهش حجم:** `{current_vol/avg_vol:.1f}X` برابر میانگین!\n"
@@ -964,7 +981,7 @@ async def generate_daily_digest():
     prompt = (
         f"یک خلاصه بسیار کوتاه (حداکثر ۳ سطر) از مهم‌ترین اخبار کریپتو ارائه بده:\n{raw_news}\n\n"
         "⚠️ توضیحات را فارسی بنویس، اما نام ارزها و اصطلاحات "
-        "(ETF, DeFi, Whale, Halving) را انگلیسی نگه دار."
+        "(ETF, DeFi, Whale, Halving) را انگلیسی نگه دار. املای فارسی را دقیق رعایت کن."
     )
     try:
         news_summary = await query_gemini(prompt)
