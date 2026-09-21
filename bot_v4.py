@@ -11,6 +11,9 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
+# استفاده از کتابخانه pydub برای پردازش و تبدیل فایل صوتی
+from pydub import AudioSegment
+
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import (
@@ -24,12 +27,9 @@ from aiohttp import web
 # تنظیمات لاگینگ
 logging.basicConfig(level=logging.INFO)
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "8800494482"))
-
-if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
-    raise ValueError("❌ متغیرهای TELEGRAM_BOT_TOKEN یا GEMINI_API_KEY در تنظیمات یافت نشدند.")
 
 genai.configure(api_key=GEMINI_API_KEY)
 
@@ -38,7 +38,15 @@ dp = Dispatcher()
 
 user_data = {}
 price_alerts = []
-subscribers = set()
+
+# --- دستور سیستمی سراسری برای فارسی‌سازی ---
+PERSIAN_SYSTEM_INSTRUCTION = (
+    "تو یک دستیار هوشمند، تحلیل‌گر و حرفه‌ای بازار کریپتو هستی. "
+    "قانون طلایی: همیشه و در همه شرایط فقط و فقط به زبان فارسی روان، حرفه‌ای و تریدری پاسخ بده. "
+    "هرگز به انگلیسی جواب نده، مگر اینکه کاربر صراحتاً درخواست کند. "
+    "نام نمادها، اعداد، و اصطلاحات تخصصی (مثل Long، Short، TP، SL، RSI، MACD) را می‌توانی به انگلیسی نگه داری، "
+    "اما توضیحات، تحلیل و متن اصلی باید کاملاً فارسی باشد."
+)
 
 def get_user(user_id: int):
     if user_id not in user_data:
@@ -54,9 +62,13 @@ def get_user(user_id: int):
         }
     return user_data[user_id]
 
-# --- فراخوانی جمینای با پشتیبان هوشمند ---
+# --- فراخوانی جمینای با پشتیبان هوشمند (پایه gemini-2.0-flash) ---
 async def query_gemini(prompt: str) -> str:
+    # تزریق دستور سیستمی فارسی به تمام درخواست‌ها
+    full_prompt = f"{PERSIAN_SYSTEM_INSTRUCTION}\n\n---\n\n{prompt}"
+
     preferred_models = [
+        "gemini-2.0-flash",
         "gemini-1.5-flash",
         "gemini-1.5-pro",
         "gemini-pro"
@@ -77,13 +89,25 @@ async def query_gemini(prompt: str) -> str:
     last_error = None
     for model_name in candidate_models:
         try:
-            model = genai.GenerativeModel(model_name)
+            model = genai.GenerativeModel(
+                model_name,
+                system_instruction=PERSIAN_SYSTEM_INSTRUCTION
+            )
             response = await asyncio.to_thread(model.generate_content, prompt)
             if response and response.text:
                 return response.text
         except Exception as e:
             last_error = e
             continue
+
+    # اگر همه مدل‌ها شکست خوردند، یک بار دیگر بدون system_instruction امتحان کن
+    try:
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        response = await asyncio.to_thread(model.generate_content, full_prompt)
+        if response and response.text:
+            return response.text
+    except Exception as e:
+        last_error = e
 
     raise last_error or Exception("هیچ‌کدام از مدل‌های جمینای پاسخ ندادند.")
 
@@ -101,14 +125,10 @@ main_keyboard = ReplyKeyboardMarkup(
 def timeframe_keyboard(symbol: str):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="5m", callback_data=f"tf:{symbol}:5m"),
             InlineKeyboardButton(text="15m", callback_data=f"tf:{symbol}:15m"),
-            InlineKeyboardButton(text="1h", callback_data=f"tf:{symbol}:1h")
-        ],
-        [
+            InlineKeyboardButton(text="1h", callback_data=f"tf:{symbol}:1h"),
             InlineKeyboardButton(text="4h", callback_data=f"tf:{symbol}:4h"),
-            InlineKeyboardButton(text="1d", callback_data=f"tf:{symbol}:1d"),
-            InlineKeyboardButton(text="1w", callback_data=f"tf:{symbol}:1w")
+            InlineKeyboardButton(text="1d", callback_data=f"tf:{symbol}:1d")
         ]
     ])
 
@@ -125,7 +145,7 @@ def buy_vip_keyboard():
         [InlineKeyboardButton(text="💎 دریافت VIP رایگان با دعوت دوستان", callback_data="buy_vip")]
     ])
 
-# --- توابع بازار ---
+# --- توابع دریافت و پردازش داده‌های بازار ---
 async def get_crypto_dataframe(symbol="BTC/USDT", timeframe="1h", limit=100):
     exchange = ccxt.coinex()
     try:
@@ -208,17 +228,6 @@ async def fetch_crypto_news():
         except Exception as e:
             logging.error(f"News Source 1 Error: {e}")
 
-        try:
-            url2 = "https://api.rss2json.com/v1/api.json?rss_url=https%3A%2F%2Fwww.coindesk.com%2Farc%2Foutboundfeeds%2Frss%2F"
-            async with session.get(url2, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    articles = data.get("items", [])[:5]
-                    if articles:
-                        return "".join([f"- Title: {a.get('title')}\n  Body: {a.get('description')[:150]}...\n\n" for a in articles])
-        except Exception as e:
-            logging.error(f"News Source 2 Error: {e}")
-
     return "- Title: Crypto Market Volatility\n  Body: High market volatility continues across major crypto assets.\n\n"
 
 async def scan_pump_candidates():
@@ -231,7 +240,7 @@ async def scan_pump_candidates():
             if symbol.endswith("/USDT"):
                 volume = data.get('quoteVolume') or 0
                 change = data.get('percentage') or 0
-                if volume >= 30000 and change >= 3.0:
+                if volume >= 30000 and change >= 2.0:
                     candidates.append({'symbol': symbol, 'change': float(change), 'volume': float(volume)})
         return sorted(candidates, key=lambda x: x['change'], reverse=True)[:5]
     except Exception:
@@ -274,15 +283,15 @@ def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> byte
         ax_main.plot([i, i], [low_p, high_p], color=color, linewidth=1)
         ax_main.bar(i, abs(close_p - open_p), bottom=min(open_p, close_p), color=color, width=0.6)
 
-    ax_main.plot(range(n), df['EMA_50'], color='#2196F3', linewidth=1.2, label='متحرک نمایی ۵۰')
-    ax_main.plot(range(n), df['EMA_200'], color='#FF9800', linewidth=1.2, label='متحرک نمایی ۲۰۰')
+    ax_main.plot(range(n), df['EMA_50'], color='#2196F3', linewidth=1.2, label='EMA 50')
+    ax_main.plot(range(n), df['EMA_200'], color='#FF9800', linewidth=1.2, label='EMA 200')
 
     last_price = df['Close'].iloc[-1]
     ax_main.axhline(y=last_price, color='red', linestyle='--', linewidth=1)
     ax_main.text(n-1, last_price, f" {last_price:.4f}", color='white', backgroundcolor='red', fontsize=8, fontweight='bold', va='center')
 
     ax_main.grid(True, linestyle='--', alpha=0.5, color='#e0e0e0')
-    ax_main.set_title(f"{clean_symbol} {timeframe} - سامانه تحلیل آلفا‌انجین", fontsize=12, fontweight='bold', pad=10)
+    ax_main.set_title(f"{clean_symbol} {timeframe} - Multi-Timeframe AlphaEngine Pro", fontsize=12, fontweight='bold', pad=10)
     ax_main.legend(loc='upper left', fontsize=8)
     ax_main.yaxis.tick_right()
 
@@ -327,44 +336,45 @@ async def generate_signal(symbol: str, timeframe: str):
     has_fvg = df['FVG_Bullish'].iloc[-3:].any()
     has_ob = df['OrderBlock_Bullish'].iloc[-5:].any()
 
-    # پرامپت کاملاً فارسی برای تحلیل (دکمه‌ها و کلیدهای ربات انگلیسی می‌مانند)
     prompt = f"""
-    تو مدیر ارشد ریسک یک صندوق سرمایه‌گذاری رمزارز هستی. یک تحلیل حرفه‌ای و کاملاً فارسی و ساختاریافته برای رمزارز {formatted_symbol} در تایم‌فریم {timeframe} بنویس. 
-    ⚠️ قانون بسیار مهم: کل متن پاسخ، تحلیل‌ها، تیترها و توضیحات باید به زبان فارسی روان باشد.
+    تو مدیر ارشد ریسک یک هج‌فاند کریپتو هستی. یک ستاپ فوق‌پیشرفته موسسه‌ای برای {formatted_symbol} در تایم‌فریم {timeframe} صادر کن.
 
-    اطلاعات فنی بازار:
-    - روند روزانه: {trend_1d}
-    - روند ۴ ساعته: {trend_4h}
+    همگرایی روندهای تایم‌فریم بالاتر (Multi-TF Confluence):
+    - روند دیلی (1D): {trend_1d}
+    - روند چهارساعته (4H): {trend_4h}
     - وضعیت کلان بیت‌کوین: {"صعودی 🟢" if btc_bullish else "نزولی 🔴"}
-    - قیمت فعلی: {price} | نویز بازار: {atr_val}
-    - وضعیت نوسان: {squeeze_status}
-    - خلأ نقدینگی: {has_fvg} | اوردربلاک: {has_ob}
-    - نسبت سفارشات خرید به فروش: {ob_data['ratio']:.2f} | شاخص قدرت نسبی: {rsi:.2f}
+    
+    داده‌های فنی و ICT:
+    - قیمت فعلی: {price} | ATR (نویز بازار): {atr_val}
+    - وضعیت نوسان (Bollinger Squeeze): {squeeze_status}
+    - FVG خریداران: {has_fvg} | Order Block: {has_ob}
+    - نسبت سفارشات خرید/فروش: {ob_data['ratio']:.2f} | RSI: {rsi:.2f}
 
-    فرمت پاسخ دقیقاً باید به شکل زیر باشد (تماماً فارسی):
+    فرمت خروجی دقیقاً طبق ساختار زیر باشد:
 
-    ⚡️ سامانه تحلیل سازمانی آلفا‌انجین
+    ⚡️ AlphaEngine Institutional Multi-TF Setup
     📊 نماد: #{formatted_symbol.replace('/', '')} | تایم‌فریم: {timeframe}
-    🌐 همگرایی روندها: روزانه: {trend_1d} | ۴ ساعته: {trend_4h}
+    🌐 همگرایی روندها: 1D: {trend_1d} | 4H: {trend_4h}
     🌀 وضعیت نوسان: {squeeze_status}
 
     🎯 ستاپ معاملاتی:
-    • جهت معامله: [خرید 🟢 / فروش 🔴 / انتظار 🟡]
-    • محدوده دقیق ورود: [بازه قیمت به فارسی]
-    • اهرم پیشنهادی: [کراس ۱ تا ۳ برابر]
+    • جهت معامله: [Long 🟢 / Short 🔴 / Wait 🟡]
+    • محدوده دقیق ورود (Entry Zone): [بازه قیمت]
+    • اهرم پیشنهادی: [Cross 1x-3x]
 
     🚀 اهداف سودآوری:
-    ▫️ هدف اول: [عدد] 👈 (خروج ۵۰٪ حجم و ریسک‌فری)
-    ▫️ هدف دوم: [عدد] 👈 (خروج ۳۰٪ حجم)
-    ▫️ هدف سوم: [عدد] 👈 (تارگت نهایی)
+    ▫️ TP1: [عدد] 👈 (۵۰٪ خروج + فری‌ریسک)
+    ▫️ TP2: [عدد] 👈 (۳۰٪ خروج)
+    ▫️ TP3: [عدد] 👈 (پوزیشن نهایی)
 
-    🛑 مدیریت ریسک و حد ضرر:
-    • حد ضرر: [عدد]
-    • شرط ابطال ستاپ: [توضیح کوتاه فارسی]
+    🛑 حد ضرر (ATR Based): [عدد]
+    ❌ شرط ابطال ستاپ: [توضیح کوتاه]
 
-    🏛 تحلیل ساختاری و نقدینگی:
-    • تحلیل پرایس اکشن و نقدینگی: [توضیح فارسی کوتاه]
-    • رادار تله نهنگ: [توضیح فارسی کوتاه]
+    🏛 تحلیل پرایس‌اکشن و نقدینگی (SMC & Wyckoff):
+    • تحلیل FVG و اوردربلاک: [۱ خط]
+    • رادار تله نهنگ: [۱ خط]
+
+    ⚠️ یادآوری مهم: کل پاسخ را فقط و فقط به زبان فارسی روان، حرفه‌ای و تریدری بنویس. از هیچ کلمه انگلیسی به جز نام نمادها، اعداد و اصطلاحات تخصصی (مثل Long/Short/TP/SL) استفاده نکن.
     """
 
     try:
@@ -375,11 +385,76 @@ async def generate_signal(symbol: str, timeframe: str):
     chart_bytes = await asyncio.to_thread(generate_custom_chart, df, formatted_symbol, timeframe)
     return response_text, chart_bytes
 
+# --- هاندلر پردازش پیام صوتی با کتابخانه pydub و Gemini 2.0 Flash ---
+@dp.message(F.voice)
+async def handle_voice_message(message: types.Message):
+    msg = await message.answer("🎙 در حال تبدیل و تحلیل ویس توسط هوش مصنوعی...")
+    file_id = message.voice.file_id
+    
+    ogg_filename = f"voice_{message.message_id}_{message.from_user.id}.ogg"
+    wav_filename = f"voice_{message.message_id}_{message.from_user.id}.wav"
+
+    try:
+        # ۱. دانلود فایل صوتی از تلگرام
+        file = await bot.get_file(file_id)
+        await bot.download_file(file.file_path, destination=ogg_filename)
+
+        # ۲. تبدیل فرمت ogg به wav استاندارد با کتابخانه pydub
+        sound = AudioSegment.from_file(ogg_filename, format="ogg")
+        sound.export(wav_filename, format="wav")
+
+        # ۳. آپلود فایل WAV به جمینای
+        audio_file = await asyncio.to_thread(
+            genai.upload_file, 
+            path=wav_filename, 
+            mime_type="audio/wav"
+        )
+
+        prompt = (
+            "این یک فایل صوتی از کاربر در مورد بازار کریپتو و ارزهای دیجیتال است. "
+            "متن صحبت او را متوجه شو، سوال یا درخواست او را بررسی کن و یک پاسخ جامع، تحلیلی و حرفه‌ای ارائه بده.\n\n"
+            "⚠️ مهم: کل پاسخ را فقط و فقط به زبان فارسی روان، حرفه‌ای و تریدری بنویس. "
+            "حتی اگر کاربر به انگلیسی یا زبان دیگری صحبت کرد، تو باید به فارسی جواب بدهی."
+        )
+
+        # ۴. پردازش دقیقاً با Gemini 2.0 Flash + system_instruction فارسی
+        model = genai.GenerativeModel(
+            "gemini-2.0-flash",
+            system_instruction=PERSIAN_SYSTEM_INSTRUCTION
+        )
+        response = await asyncio.to_thread(
+            model.generate_content,
+            [audio_file, prompt]
+        )
+
+        # ۵. پاک‌سازی فایل صوتی از جمینای و دیسک
+        try:
+            await asyncio.to_thread(genai.delete_file, audio_file.name)
+        except Exception:
+            pass
+
+        for path in [ogg_filename, wav_filename]:
+            if os.path.exists(path):
+                os.remove(path)
+
+        # ۶. ارسال پاسخ
+        if response and response.text:
+            await msg.edit_text(f"🗣 **پاسخ دستیار صوتی:**\n\n{response.text}", parse_mode="Markdown")
+        else:
+            await msg.edit_text("⚠️ متأسفانه متنی از فایل صوتی تشخیص داده نشد.")
+
+    except Exception as e:
+        logging.error(f"Voice handling error: {e}")
+        for path in [ogg_filename, wav_filename]:
+            if os.path.exists(path):
+                os.remove(path)
+        await msg.edit_text(f"⚠️ متأسفانه در پردازش فایل صوتی خطایی رخ داد:\n`{e}`", parse_mode="Markdown")
+
+# --- دستور استارت (شیک و حرفه‌ای) ---
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     user_id = message.from_user.id
     user = get_user(user_id)
-    subscribers.add(user_id)
     user["state"] = None
 
     args = message.text.split()
@@ -399,14 +474,24 @@ async def start_cmd(message: types.Message):
 
     bot_info = await bot.get_me()
     ref_link = f"https://t.me/{bot_info.username}?start={user_id}"
+    status_text = "✨ VIP" if user["is_vip"] else "Standard 🔑"
+
+    start_text = (
+        f"🏛 **AlphaEngine Terminal Pro**\n"
+        f"────────────────────────\n\n"
+        f"به ترمینال تخصصی تحلیل الگوریتمی بازار کریپتو خوش آمدید.\n\n"
+        f"🔰 **وضعیت حساب:** `{status_text}`\n"
+        f"📡 **وضعیت اتصال:** آنلاین 🟢\n\n"
+        f"💡 **راهنمای سریع:**\n"
+        f"برای دریافت ستاپ معاملاتی و چارت تحلیلی، کافی است **نام نماد** (مانند `BTC` یا `SOL`) را ارسال کرده یا ویس بفرستید.\n\n"
+        f"🎁 **ارتقا به سطح VIP:**\n"
+        f"با دعوت ۳ دوست، دسترسی VIP را به صورت رایگان دریافت کنید.\n"
+        f"🔗 **لینک دعوت اختصاصی:**\n`{ref_link}`\n\n"
+        f"👥 دعوت‌های فعال: **{len(user['referrals'])} از ۳**"
+    )
 
     await message.answer(
-        f"👋 به **AlphaEngine Pro** خوش آمدید!\n\n"
-        f"🎁 **سیستم دعوت و VIP رایگان:**\n"
-        f"با دعوت ۳ نفر به ربات، اشتراک **VIP رایگان** دریافت کنید!\n\n"
-        f"🔗 لینک دعوت اختصاصی شما:\n`{ref_link}`\n"
-        f"👥 تعداد دعوت‌های شما: **{len(user['referrals'])} نفر**\n\n"
-        f"نام ارز مورد نظر خود را ارسال کنید یا از منوی زیر استفاده کنید:",
+        start_text,
         reply_markup=main_keyboard,
         parse_mode="Markdown"
     )
@@ -432,7 +517,11 @@ async def crypto_news_handler(message: types.Message):
     msg = await message.answer("🔄 در حال دریافت آخرین اخبار...")
     raw_news = await fetch_crypto_news()
 
-    prompt = f"این اخبار کریپتو را به صورت تحلیلی، جذاب و کاملاً فارسی خلاصه کن:\n{raw_news}"
+    prompt = (
+        f"این اخبار کریپتو را تحلیلی و ساختاریافته خلاصه کن:\n{raw_news}\n\n"
+        "⚠️ پاسخ را فقط و فقط به زبان فارسی روان، حرفه‌ای و تریدری بنویس. "
+        "از هیچ کلمه انگلیسی استفاده نکن به جز نام ارزها و اصطلاحات تخصصی."
+    )
     try:
         response_text = await query_gemini(prompt)
         await msg.edit_text(f"📰 **خلاصه اخبار و احساسات بازار:**\n\n{response_text}", parse_mode="Markdown")
@@ -469,7 +558,6 @@ async def callback_my_alerts(callback: types.CallbackQuery):
 
 @dp.message(F.text == "🚀 اسکنر ارزهای پامپی")
 async def pump_scanner_handler(message: types.Message):
-    subscribers.add(message.from_user.id)
     user = get_user(message.from_user.id)
     if not user["is_vip"]:
         await message.answer("🔒 مخصوص کاربران VIP (برای فعال‌سازی ۳ نفر را دعوت کنید).", reply_markup=buy_vip_keyboard())
@@ -488,7 +576,6 @@ async def pump_scanner_handler(message: types.Message):
 
 @dp.message(F.text == "🐳 رادار توکن‌های جدید (DEX)")
 async def dex_radar_handler(message: types.Message):
-    subscribers.add(message.from_user.id)
     user = get_user(message.from_user.id)
     if not user["is_vip"]:
         await message.answer("🔒 مخصوص کاربران VIP (برای فعال‌سازی ۳ نفر را دعوت کنید).", reply_markup=buy_vip_keyboard())
@@ -519,7 +606,6 @@ async def start_risk_calc(message: types.Message):
 
 @dp.message(F.text == "👤 حساب کاربری")
 async def user_profile(message: types.Message):
-    subscribers.add(message.from_user.id)
     user = get_user(message.from_user.id)
     status_text = "💎 VIP" if user["is_vip"] else "👤 رایگان"
     await message.answer(f"👤 **پروفایل کاربری:**\n\n🆔 آیدی: `{message.from_user.id}`\n👑 وضعیت: {status_text}\n👥 تعداد دعوت‌ها: **{len(user['referrals'])}**", parse_mode="Markdown")
@@ -546,245 +632,6 @@ async def handle_timeframe_click(callback: types.CallbackQuery):
                 await callback.message.answer_photo(photo=photo_file, caption=f"📊 چارت {symbol} ({tf})")
 
         if signal_text:
-            if len(signal_text) > 4000:
-                chunks = [signal_text[i:i+4000] for i in range(0, len(signal_text), 4000)]
-                for chunk in chunks:
-                    try:
-                        await callback.message.answer(chunk, parse_mode="Markdown")
-                    except Exception:
-                        await callback.message.answer(chunk)
-            else:
-                try:
-                    await callback.message.answer(signal_text, parse_mode="Markdown")
-                except Exception:
-                    await callback.message.answer(signal_text)
-            
-    except Exception as e:
-        logging.error(f"Callback Error: {e}")
-        await callback.message.answer(f"⚠️ خطایی در اجرای تحلیل رخ داد:\n{e}")
-
-@dp.message(F.text)
-async def handle_text_input(message: types.Message):
-    subscribers.add(message.from_user.id)
-    text = message.text.strip()
-    user = get_user(message.from_user.id)
-    state = user.get("state")
-
-    if state == "awaiting_alert_symbol":
-        formatted = text.upper()
-        if not formatted.endswith("/USDT"):
-            formatted += "/USDT"
-        user["alert_temp"]["symbol"] = formatted
-        user["state"] = "awaiting_alert_price"
-        await message.answer(f"قیمت مد نظر برای **{formatted}** (به دلار) را وارد کنید:")
-        return
-
-    elif state == "awaiting_alert_price":
-        try:
-            target_p = float(text)
-            symbol = user["alert_temp"]["symbol"]
-            
-            exchange = ccxt.coinex()
-            ticker = await exchange.fetch_ticker(symbol)
-            await exchange.close()
-            current_p = ticker['close']
-            
-            price_alerts.append({
-                "user_id": message.from_user.id,
-                "symbol": symbol,
-                "target_price": target_p,
-                "condition": "above" if target_p > current_p else "below"
-            })
-            
-            user["state"] = None
-            await message.answer(f"✅ **هشدار قیمت ثبت شد!**\nارز: {symbol} | هدف: `${target_p}`", reply_markup=alert_success_keyboard(), parse_mode="Markdown")
-        except Exception:
-            await message.answer("⚠️ قیمت نامعتبر است.")
-        return
-
-    elif state == "awaiting_capital":
-        try:
-            user["risk_calc_data"]["capital"] = float(text)
-            user["state"] = "awaiting_risk_pct"
-            await message.answer("درصد ریسک در معامله (مثلاً 1 یا 2) را وارد کنید:")
-        except ValueError:
-            await message.answer("لطفاً عدد وارد کنید.")
-        return
-
-    elif state == "awaiting_risk_pct":
-        try:
-            user["risk_calc_data"]["risk_pct"] = float(text)
-            user["state"] = "awaiting_entry"
-            await message.answer("قیمت ورود:")
-        except ValueError:
-            await message.answer("لطفاً عدد وارد کنید.")
-        return
-
-    elif state == "awaiting_entry":
-        try:
-            user["risk_calc_data"]["entry"] = float(text)
-            user["state"] = "awaiting_sl"
-            await message.answer("قیمت حد ضرر:")
-        except ValueError:
-            await message.answer("لطفاً عدد وارد کنید.")
-        return
-
-    elif state == "awaiting_sl":
-        try:
-            sl = float(text)
-            data = user["risk_calc_data"]
-            capital, risk_pct, entry = data["capital"], data["risk_pct"], data["entry"]
-            user["state"] = None
-
-            risk_amount = capital * (risk_pct / 100)
-            sl_distance_pct = abs(entry - sl) / entry
-            position_size = risk_amount / sl_distance_pct
-
-            result = (
-                f"🧮 **نتیجه مدیریت ریسک:**\n\n"
-                f"💵 کل سرمایه: `${capital:,.2f}`\n"
-                f"🎯 میزان ریسک: `${risk_amount:,.2f}` ({risk_pct}%)\n"
-                f"✅ **حجم پیشنهادی برای ورود:** `${position_size:,.2f}`"
-            )
-            await message.answer(result, parse_mode="Markdown")
-        except ValueError:
-            await message.answer("لطفاً عدد وارد کنید.")
-        return
-
-    symbol_text = text.upper()
-    if symbol_text.startswith("/") or symbol_text in ["🚀 اسکنر ارزهای پامپی", "🐳 رادار توکن‌های جدید (DEX)", "📊 شاخص ترس و طمع", "🧮 محاسبه ریسک", "👤 حساب کاربری", "🔔 هشدار قیمت", "📰 اخبار و تحلیل احساسات", "👥 سیستم دعوت و هدیه"]:
-        return
-
-    await message.answer(f"⏱ تایم‌فریم تحلیل **{symbol_text}** را انتخاب کنید:", reply_markup=timeframe_keyboard(symbol_text))
-
-# --- سیستم هشدار فوری پامپ و دامپ خودکار ---
-async def instant_pump_dump_monitor():
-    seen_pumps = set()
-    while True:
-        try:
-            await asyncio.sleep(180)
-            candidates = await scan_pump_candidates()
-            for c in candidates:
-                sym = c['symbol']
-                change = c['change']
-                if change >= 5.0 and sym not in seen_pumps:
-                    seen_pumps.add(sym)
-                    alert_msg = (
-                        f"🚨 **سیستم هشدار فوری پامپ بازار!** 🔥\n\n"
-                        f"🪙 رمزارز: **#{sym.replace('/', '')}**\n"
-                        f"📈 میزان رشد ناگهانی: `+{change:.2f}%`\n\n"
-                        f"⚡️ فرصت طلایی نوسان‌گیری شناسایی شد. برای تحلیل دقیق، نام ارز را در ربات ارسال کنید."
-                    )
-                    for uid in list(subscribers):
-                        try:
-                            await bot.send_message(uid, alert_msg, parse_mode="Markdown")
-                            await asyncio.sleep(0.05)
-                        except Exception:
-                            pass
-                    asyncio.create_task(clear_seen_pump(sym, seen_pumps))
-        except Exception as e:
-            logging.error(f"Pump Monitor Error: {e}")
-            await asyncio.sleep(60)
-
-async def clear_seen_pump(sym, seen_set):
-    await asyncio.sleep(7200)
-    if sym in seen_set:
-        seen_set.remove(sym)
-
-async def generate_daily_digest():
-    fng_val, fng_class = "N/A", "N/A"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get("https://api.alternative.me/fng/") as resp:
-                if resp.status == 200:
-                    d = await resp.json()
-                    fng_val = d["data"][0]["value"]
-                    fng_class = d["data"][0]["value_classification"]
-    except Exception:
-        pass
-
-    _, df_btc = await get_crypto_dataframe("BTC/USDT", "1d", 30)
-    btc_price = df_btc['Close'].iloc[-1] if df_btc is not None else 0
-    btc_change = df_btc['Close'].pct_change().iloc[-1] * 100 if df_btc is not None else 0
-
-    raw_news = await fetch_crypto_news()
-    prompt = f"یک خلاصه بسیار کوتاه و جذاب (حداکثر ۳ سطر) به زبان فارسی از مهم‌ترین اخبار کریپتو ارائه بده:\n{raw_news}"
-    try:
-        news_summary = await query_gemini(prompt)
-    except Exception:
-        news_summary = "تغییرات شدید نوسانی در بازار مشاهده می‌شود."
-
-    return (
-        f"☀️ **بولتن تحلیلی روزانه آلفا‌انجین**\n\n"
-        f"🪙 **بیت‌کوین (BTC):** `${btc_price:,.2f}` (`{btc_change:+.2f}%`)\n"
-        f"📊 **شاخص ترس و طمع:** {fng_val}/100 ({fng_class})\n\n"
-        f"📰 **خلاصه اخبار:**\n{news_summary}\n\n"
-        f"💡 برای تحلیل کامل هر ارز، نام آن را در ربات بفرستید."
-    )
-
-async def daily_digest_scheduler():
-    while True:
-        await asyncio.sleep(60)
-        now = datetime.datetime.now()
-        if now.hour == 8 and now.minute == 0:
-            digest_msg = await generate_daily_digest()
-            for u_id in list(subscribers):
-                try:
-                    await bot.send_message(u_id, digest_msg, parse_mode="Markdown")
-                    await asyncio.sleep(0.05)
-                except Exception as e:
-                    logging.warning(f"Failed to send digest to {u_id}: {e}")
-            await asyncio.sleep(300)
-
-async def background_alert_checker():
-    while True:
-        try:
-            await asyncio.sleep(30)
-            if not price_alerts:
-                continue
-
-            exchange = ccxt.coinex()
-            for alert in price_alerts[:]:
-                symbol = alert['symbol']
-                target = alert['target_price']
-                condition = alert['condition']
-
-                try:
-                    ticker = await exchange.fetch_ticker(symbol)
-                    current_price = ticker['close']
-
-                    if (condition == "above" and current_price >= target) or (condition == "below" and current_price <= target):
-                        await bot.send_message(
-                            chat_id=alert['user_id'],
-                            text=f"🚨 **هشدار قیمت رسید!**\n\n🪙 ارز: **{symbol}**\n🎯 قیمت هدف: `${target}`\n💵 قیمت فعلی: `${current_price}`",
-                            parse_mode="Markdown"
-                        )
-                        price_alerts.remove(alert)
-                except Exception as e:
-                    logging.error(f"Alert Check Error: {e}")
-
-            await exchange.close()
-        except Exception as e:
-            logging.error(f"Alert Loop Error: {e}")
-
-async def handle_web(request):
-    return web.Response(text="AlphaEngine Pro Active!")
-
-app = web.Application()
-app.router.add_get('/', handle_web)
-
-async def main():
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 10000))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    
-    asyncio.create_task(background_alert_checker())
-    asyncio.create_task(daily_digest_scheduler())
-    asyncio.create_task(instant_pump_dump_monitor())
-    
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+            try:
+                await callback.message.answer(signal_text, parse_mode="Markdown")
+            except
