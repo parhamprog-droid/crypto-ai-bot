@@ -634,4 +634,266 @@ async def handle_timeframe_click(callback: types.CallbackQuery):
         if signal_text:
             try:
                 await callback.message.answer(signal_text, parse_mode="Markdown")
-            except
+            except Exception:
+                await callback.message.answer(signal_text)
+            
+    except Exception as e:
+        logging.error(f"Callback Error: {e}")
+        await callback.message.answer(f"⚠️ خطایی در اجرای تحلیل رخ داد:\n{e}")
+
+@dp.message(F.text)
+async def handle_text_input(message: types.Message):
+    text = message.text.strip()
+    user = get_user(message.from_user.id)
+    state = user.get("state")
+
+    if state == "awaiting_alert_symbol":
+        formatted = text.upper()
+        if not formatted.endswith("/USDT"):
+            formatted += "/USDT"
+        user["alert_temp"]["symbol"] = formatted
+        user["state"] = "awaiting_alert_price"
+        await message.answer(f"قیمت مد نظر برای **{formatted}** (به دلار) را وارد کنید:")
+        return
+
+    elif state == "awaiting_alert_price":
+        try:
+            target_p = float(text)
+            symbol = user["alert_temp"]["symbol"]
+            
+            exchange = ccxt.coinex()
+            ticker = await exchange.fetch_ticker(symbol)
+            await exchange.close()
+            current_p = ticker['close']
+            
+            price_alerts.append({
+                "user_id": message.from_user.id,
+                "symbol": symbol,
+                "target_price": target_p,
+                "condition": "above" if target_p > current_p else "below"
+            })
+            
+            user["state"] = None
+            await message.answer(f"✅ **هشدار قیمت ثبت شد!**\nارز: {symbol} | هدف: `${target_p}`", reply_markup=alert_success_keyboard(), parse_mode="Markdown")
+        except Exception:
+            await message.answer("⚠️ قیمت نامعتبر است.")
+        return
+
+    elif state == "awaiting_capital":
+        try:
+            user["risk_calc_data"]["capital"] = float(text)
+            user["state"] = "awaiting_risk_pct"
+            await message.answer("درصد ریسک در معامله (مثلاً 1 یا 2) را وارد کنید:")
+        except ValueError:
+            await message.answer("لطفاً عدد وارد کنید.")
+        return
+
+    elif state == "awaiting_risk_pct":
+        try:
+            user["risk_calc_data"]["risk_pct"] = float(text)
+            user["state"] = "awaiting_entry"
+            await message.answer("قیمت ورود (Entry):")
+        except ValueError:
+            await message.answer("لطفاً عدد وارد کنید.")
+        return
+
+    elif state == "awaiting_entry":
+        try:
+            user["risk_calc_data"]["entry"] = float(text)
+            user["state"] = "awaiting_sl"
+            await message.answer("قیمت حد ضرر (Stop Loss):")
+        except ValueError:
+            await message.answer("لطفاً عدد وارد کنید.")
+        return
+
+    elif state == "awaiting_sl":
+        try:
+            sl = float(text)
+            data = user["risk_calc_data"]
+            capital, risk_pct, entry = data["capital"], data["risk_pct"], data["entry"]
+            user["state"] = None
+
+            risk_amount = capital * (risk_pct / 100)
+            sl_distance_pct = abs(entry - sl) / entry
+            position_size = risk_amount / sl_distance_pct
+
+            result = (
+                f"🧮 **نتیجه مدیریت ریسک:**\n\n"
+                f"💵 کل سرمایه: `${capital:,.2f}`\n"
+                f"🎯 میزان ریسک: `${risk_amount:,.2f}` ({risk_pct}%)\n"
+                f"✅ **حجم پیشنهادی برای ورود:** `${position_size:,.2f}`"
+            )
+            await message.answer(result, parse_mode="Markdown")
+        except ValueError:
+            await message.answer("لطفاً عدد وارد کنید.")
+        return
+
+    symbol_text = text.upper()
+    if symbol_text.startswith("/") or symbol_text in ["🚀 اسکنر ارزهای پامپی", "🐳 رادار توکن‌های جدید (DEX)", "📊 شاخص ترس و طمع", "🧮 محاسبه ریسک", "👤 حساب کاربری", "🔔 هشدار قیمت", "📰 اخبار و تحلیل احساسات", "👥 سیستم دعوت و هدیه"]:
+        return
+
+    await message.answer(f"⏱ تایم‌فریم تحلیل **{symbol_text}** را انتخاب کنید:", reply_markup=timeframe_keyboard(symbol_text))
+
+# --- رادار هوشمند پیش‌بینی پامپ و دامپ ---
+async def pump_dump_detector_loop():
+    exchange = ccxt.coinex()
+    tracked_symbols = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT', 'ADA/USDT', 'AVAX/USDT', 'LINK/USDT', 'SUI/USDT', 'PEPE/USDT']
+    last_alerts = {}
+
+    while True:
+        try:
+            await asyncio.sleep(60)
+            now_ts = datetime.datetime.now().timestamp()
+
+            for symbol in tracked_symbols:
+                try:
+                    ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=21)
+                    if len(ohlcv) < 21:
+                        continue
+
+                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+                    last_candle = df.iloc[-1]
+                    prev_candles = df.iloc[:-1]
+                    
+                    avg_vol = prev_candles['Volume'].mean()
+                    current_vol = last_candle['Volume']
+                    price_change_pct = ((last_candle['Close'] - last_candle['Open']) / last_candle['Open']) * 100
+
+                    is_volume_spike = (current_vol >= avg_vol * 4) and (avg_vol > 0)
+                    
+                    alert_type = None
+                    if is_volume_spike and price_change_pct >= 1.2:
+                        alert_type = "🚀 پامپ احتمالی (Pump Alert)"
+                    elif is_volume_spike and price_change_pct <= -1.2:
+                        alert_type = "🩸 دامپ احتمالی (Dump Alert)"
+
+                    if alert_type:
+                        if symbol in last_alerts and (now_ts - last_alerts[symbol]) < 600:
+                            continue
+                        
+                        last_alerts[symbol] = now_ts
+                        clean_sym = symbol.replace('/', '')
+                        alert_msg = (
+                            f"🚨 **هشدار هوشمند رادار بازار!**\n\n"
+                            f"🪙 **نماد:** #{clean_sym}\n"
+                            f"📊 **نوع هشدار:** {alert_type}\n"
+                            f"📈 **تغییر قیمت ۵ دقیقه:** `{price_change_pct:+.2f}%`\n"
+                            f"⚡️ **جهش حجم:** `{current_vol/avg_vol:.1f}X` برابر میانگین!\n"
+                            f"💵 **قیمت فعلی:** `${last_candle['Close']}`\n\n"
+                            f"💡 *پیش از ورود حتماً تحلیل چند تایم‌فریمی ارز را بررسی کنید.*"
+                        )
+
+                        for u_id, u_info in list(user_data.items()):
+                            if u_info.get("is_vip", False):
+                                try:
+                                    await bot.send_message(u_id, alert_msg, parse_mode="Markdown")
+                                    await asyncio.sleep(0.05)
+                                except Exception:
+                                    pass
+                except Exception as e:
+                    logging.error(f"Error checking {symbol}: {e}")
+
+        except Exception as e:
+            logging.error(f"Pump/Dump Loop Error: {e}")
+
+# --- بولتن روزانه خودکار ---
+async def generate_daily_digest():
+    fng_val, fng_class = "N/A", "N/A"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://api.alternative.me/fng/") as resp:
+                if resp.status == 200:
+                    d = await resp.json()
+                    fng_val = d["data"][0]["value"]
+                    fng_class = d["data"][0]["value_classification"]
+    except Exception:
+        pass
+
+    _, df_btc = await get_crypto_dataframe("BTC/USDT", "1d", 30)
+    btc_price = df_btc['Close'].iloc[-1] if df_btc is not None else 0
+    btc_change = df_btc['Close'].pct_change().iloc[-1] * 100 if df_btc is not None else 0
+
+    raw_news = await fetch_crypto_news()
+    prompt = (
+        f"یک خلاصه بسیار کوتاه و جذاب (حداکثر ۳ سطر) از مهم‌ترین اخبار کریپتو ارائه بده:\n{raw_news}\n\n"
+        "⚠️ فقط و فقط به زبان فارسی روان بنویس."
+    )
+    try:
+        news_summary = await query_gemini(prompt)
+    except Exception:
+        news_summary = "تغییرات شدید نوسانی در بازار مشاهده می‌شود."
+
+    return (
+        f"☀️ **بولتن تحلیلی روزانه AlphaEngine**\n\n"
+        f"🪙 **بیت‌کوین (BTC):** `${btc_price:,.2f}` (`{btc_change:+.2f}%`)\n"
+        f"📊 **شاخص ترس و طمع:** {fng_val}/100 ({fng_class})\n\n"
+        f"📰 **خلاصه اخبار:**\n{news_summary}\n\n"
+        f"💡 برای تحلیل کامل، نام ارز یا ویس خود را بفرستید."
+    )
+
+async def daily_digest_scheduler():
+    while True:
+        await asyncio.sleep(60)
+        now = datetime.datetime.now()
+        if now.hour == 8 and now.minute == 0:
+            digest_msg = await generate_daily_digest()
+            for u_id in list(user_data.keys()):
+                try:
+                    await bot.send_message(u_id, digest_msg, parse_mode="Markdown")
+                    await asyncio.sleep(0.05)
+                except Exception as e:
+                    logging.warning(f"Failed to send digest to {u_id}: {e}")
+            await asyncio.sleep(300)
+
+async def background_alert_checker():
+    while True:
+        try:
+            await asyncio.sleep(30)
+            if not price_alerts:
+                continue
+
+            exchange = ccxt.coinex()
+            for alert in price_alerts[:]:
+                symbol = alert['symbol']
+                target = alert['target_price']
+                condition = alert['condition']
+
+                try:
+                    ticker = await exchange.fetch_ticker(symbol)
+                    current_price = ticker['close']
+
+                    if (condition == "above" and current_price >= target) or (condition == "below" and current_price <= target):
+                        await bot.send_message(
+                            chat_id=alert['user_id'],
+                            text=f"🚨 **هشدار قیمت رسید!**\n\n🪙 ارز: **{symbol}**\n🎯 قیمت هدف: `${target}`\n💵 قیمت فعلی: `${current_price}`",
+                            parse_mode="Markdown"
+                        )
+                        price_alerts.remove(alert)
+                except Exception as e:
+                    logging.error(f"Alert Check Error: {e}")
+
+            await exchange.close()
+        except Exception as e:
+            logging.error(f"Alert Loop Error: {e}")
+
+async def handle_web(request):
+    return web.Response(text="AlphaEngine Pro Active!")
+
+app = web.Application()
+app.router.add_get('/', handle_web)
+
+async def main():
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    
+    asyncio.create_task(background_alert_checker())
+    asyncio.create_task(daily_digest_scheduler())
+    asyncio.create_task(pump_dump_detector_loop())
+    
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
