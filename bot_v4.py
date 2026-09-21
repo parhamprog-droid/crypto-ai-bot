@@ -101,14 +101,14 @@ main_keyboard = ReplyKeyboardMarkup(
 def timeframe_keyboard(symbol: str):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="5م", callback_data=f"tf:{symbol}:5m"),
-            InlineKeyboardButton(text="15م", callback_data=f"tf:{symbol}:15m"),
-            InlineKeyboardButton(text="1ساعته", callback_data=f"tf:{symbol}:1h")
+            InlineKeyboardButton(text="5m", callback_data=f"tf:{symbol}:5m"),
+            InlineKeyboardButton(text="15m", callback_data=f"tf:{symbol}:15m"),
+            InlineKeyboardButton(text="1h", callback_data=f"tf:{symbol}:1h")
         ],
         [
-            InlineKeyboardButton(text="4ساعته", callback_data=f"tf:{symbol}:4h"),
-            InlineKeyboardButton(text="روزانه", callback_data=f"tf:{symbol}:1d"),
-            InlineKeyboardButton(text="هفتگی", callback_data=f"tf:{symbol}:1w")
+            InlineKeyboardButton(text="4h", callback_data=f"tf:{symbol}:4h"),
+            InlineKeyboardButton(text="1d", callback_data=f"tf:{symbol}:1d"),
+            InlineKeyboardButton(text="1w", callback_data=f"tf:{symbol}:1w")
         ]
     ])
 
@@ -327,10 +327,10 @@ async def generate_signal(symbol: str, timeframe: str):
     has_fvg = df['FVG_Bullish'].iloc[-3:].any()
     has_ob = df['OrderBlock_Bullish'].iloc[-5:].any()
 
-    # پرامپت اصلاح‌شده و ۱۰۰٪ فارسی بدون کلمات انگلیسی
+    # پرامپت کاملاً فارسی برای تحلیل (دکمه‌ها و کلیدهای ربات انگلیسی می‌مانند)
     prompt = f"""
     تو مدیر ارشد ریسک یک صندوق سرمایه‌گذاری رمزارز هستی. یک تحلیل حرفه‌ای و کاملاً فارسی و ساختاریافته برای رمزارز {formatted_symbol} در تایم‌فریم {timeframe} بنویس. 
-    ⚠️ قانون بسیار مهم: به هیچ وجه از کلمات، تیترها یا اصطلاحات انگلیسی استفاده نکن و تمامی متن، حتی اصطلاحات فنی را به فارسی روان و دقیق برگردان.
+    ⚠️ قانون بسیار مهم: کل متن پاسخ، تحلیل‌ها، تیترها و توضیحات باید به زبان فارسی روان باشد.
 
     اطلاعات فنی بازار:
     - روند روزانه: {trend_1d}
