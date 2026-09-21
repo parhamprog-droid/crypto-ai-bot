@@ -6,3 +6,4 @@ numpy
 matplotlib
 google-generativeai
 pydub
+audioop-lts
