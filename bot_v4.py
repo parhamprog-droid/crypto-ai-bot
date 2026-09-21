@@ -30,14 +30,13 @@ PORT = int(os.getenv("PORT", 10000))
 if not BOT_TOKEN or not GEMINI_API_KEY:
     raise ValueError("❌ متغیرهای BOT_TOKEN یا GEMINI_API_KEY یافت نشدند.")
 
-# تنظیم هوش مصنوعی Gemini
+# تنظیم هوش مصنوعی Gemini با مدل پایدار
 genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+gemini_model = genai.GenerativeModel("gemini-1.5-pro")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ذخیره کاربران برای ارسال هشدارهای پس‌زمینه
 subscribers = set()
 
 # ---------------------------------------------------------
@@ -432,7 +431,7 @@ async def handle_voice(message: Message):
 
     except Exception as e:
         logging.error(f"Voice analysis error: {e}")
-        await status_msg.edit_text(f"⚠️ خطایی در تحلیل ویس رخ داد:\n`{e}`", parse_mode="Markdown")
+        await status_msg.edit_text(f"⚠️ خطایی در تحلیل ویس رخ داد:\n`{e}`", parse_message="Markdown")
 
 # ---------------------------------------------------------
 # اجرای اصلی برنامه (Main)
@@ -440,13 +439,8 @@ async def handle_voice(message: Message):
 async def main():
     logging.info("🚀 Starting AlphaEngine Pro Suite & Pump Scanner...")
 
-    # ۱. راه اندازی وب‌سرور داخلی جهت رفع خطای پورت Render
     asyncio.create_task(start_web_server())
-
-    # ۲. فعال‌سازی اسکنر پس‌زمینه هشدارهای پامپ
     asyncio.create_task(background_pump_alert_task())
-
-    # ۳. آغاز دریافت پیام‌ها از تلگرام
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
