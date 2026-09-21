@@ -101,14 +101,14 @@ main_keyboard = ReplyKeyboardMarkup(
 def timeframe_keyboard(symbol: str):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="5m", callback_data=f"tf:{symbol}:5m"),
-            InlineKeyboardButton(text="15m", callback_data=f"tf:{symbol}:15m"),
-            InlineKeyboardButton(text="1h", callback_data=f"tf:{symbol}:1h")
+            InlineKeyboardButton(text="5م", callback_data=f"tf:{symbol}:5m"),
+            InlineKeyboardButton(text="15م", callback_data=f"tf:{symbol}:15m"),
+            InlineKeyboardButton(text="1ساعته", callback_data=f"tf:{symbol}:1h")
         ],
         [
-            InlineKeyboardButton(text="4h", callback_data=f"tf:{symbol}:4h"),
-            InlineKeyboardButton(text="1d", callback_data=f"tf:{symbol}:1d"),
-            InlineKeyboardButton(text="1w", callback_data=f"tf:{symbol}:1w")
+            InlineKeyboardButton(text="4ساعته", callback_data=f"tf:{symbol}:4h"),
+            InlineKeyboardButton(text="روزانه", callback_data=f"tf:{symbol}:1d"),
+            InlineKeyboardButton(text="هفتگی", callback_data=f"tf:{symbol}:1w")
         ]
     ])
 
@@ -274,15 +274,15 @@ def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> byte
         ax_main.plot([i, i], [low_p, high_p], color=color, linewidth=1)
         ax_main.bar(i, abs(close_p - open_p), bottom=min(open_p, close_p), color=color, width=0.6)
 
-    ax_main.plot(range(n), df['EMA_50'], color='#2196F3', linewidth=1.2, label='EMA 50')
-    ax_main.plot(range(n), df['EMA_200'], color='#FF9800', linewidth=1.2, label='EMA 200')
+    ax_main.plot(range(n), df['EMA_50'], color='#2196F3', linewidth=1.2, label='متحرک نمایی ۵۰')
+    ax_main.plot(range(n), df['EMA_200'], color='#FF9800', linewidth=1.2, label='متحرک نمایی ۲۰۰')
 
     last_price = df['Close'].iloc[-1]
     ax_main.axhline(y=last_price, color='red', linestyle='--', linewidth=1)
     ax_main.text(n-1, last_price, f" {last_price:.4f}", color='white', backgroundcolor='red', fontsize=8, fontweight='bold', va='center')
 
     ax_main.grid(True, linestyle='--', alpha=0.5, color='#e0e0e0')
-    ax_main.set_title(f"{clean_symbol} {timeframe} - Multi-Timeframe AlphaEngine Pro", fontsize=12, fontweight='bold', pad=10)
+    ax_main.set_title(f"{clean_symbol} {timeframe} - سامانه تحلیل آلفا‌انجین", fontsize=12, fontweight='bold', pad=10)
     ax_main.legend(loc='upper left', fontsize=8)
     ax_main.yaxis.tick_right()
 
@@ -327,42 +327,43 @@ async def generate_signal(symbol: str, timeframe: str):
     has_fvg = df['FVG_Bullish'].iloc[-3:].any()
     has_ob = df['OrderBlock_Bullish'].iloc[-5:].any()
 
+    # پرامپت اصلاح‌شده و ۱۰۰٪ فارسی بدون کلمات انگلیسی
     prompt = f"""
-    تو مدیر ارشد ریسک یک هج‌فاند کریپتو هستی. یک ستاپ فوق‌پیشرفته موسسه‌ای به زبان کاملاً فارسی و به صورت ساختاریافته برای {formatted_symbol} در تایم‌فریم {timeframe} صادر کن.
+    تو مدیر ارشد ریسک یک صندوق سرمایه‌گذاری رمزارز هستی. یک تحلیل حرفه‌ای و کاملاً فارسی و ساختاریافته برای رمزارز {formatted_symbol} در تایم‌فریم {timeframe} بنویس. 
+    ⚠️ قانون بسیار مهم: به هیچ وجه از کلمات، تیترها یا اصطلاحات انگلیسی استفاده نکن و تمامی متن، حتی اصطلاحات فنی را به فارسی روان و دقیق برگردان.
 
-    همگرایی روندهای تایم‌فریم بالاتر (Multi-TF Confluence):
-    - روند دیلی (1D): {trend_1d}
-    - روند چهارساعته (4H): {trend_4h}
+    اطلاعات فنی بازار:
+    - روند روزانه: {trend_1d}
+    - روند ۴ ساعته: {trend_4h}
     - وضعیت کلان بیت‌کوین: {"صعودی 🟢" if btc_bullish else "نزولی 🔴"}
-    
-    داده‌های فنی و ICT:
-    - قیمت فعلی: {price} | ATR (نویز بازار): {atr_val}
-    - وضعیت نوسان (Bollinger Squeeze): {squeeze_status}
-    - FVG خریداران: {has_fvg} | Order Block: {has_ob}
-    - نسبت سفارشات خرید/فروش: {ob_data['ratio']:.2f} | RSI: {rsi:.2f}
+    - قیمت فعلی: {price} | نویز بازار: {atr_val}
+    - وضعیت نوسان: {squeeze_status}
+    - خلأ نقدینگی: {has_fvg} | اوردربلاک: {has_ob}
+    - نسبت سفارشات خرید به فروش: {ob_data['ratio']:.2f} | شاخص قدرت نسبی: {rsi:.2f}
 
-    فرمت خروجی دقیقاً طبق ساختار زیر باشد (تمام بخش‌ها کاملاً به زبان فارسی):
+    فرمت پاسخ دقیقاً باید به شکل زیر باشد (تماماً فارسی):
 
-    ⚡️ AlphaEngine Institutional Multi-TF Setup
+    ⚡️ سامانه تحلیل سازمانی آلفا‌انجین
     📊 نماد: #{formatted_symbol.replace('/', '')} | تایم‌فریم: {timeframe}
-    🌐 همگرایی روندها: 1D: {trend_1d} | 4H: {trend_4h}
+    🌐 همگرایی روندها: روزانه: {trend_1d} | ۴ ساعته: {trend_4h}
     🌀 وضعیت نوسان: {squeeze_status}
 
     🎯 ستاپ معاملاتی:
-    • جهت معامله: [Long 🟢 / Short 🔴 / Wait 🟡]
-    • محدوده دقیق ورود (Entry Zone): [بازه قیمت]
-    • اهرم پیشنهادی: [Cross 1x-3x]
+    • جهت معامله: [خرید 🟢 / فروش 🔴 / انتظار 🟡]
+    • محدوده دقیق ورود: [بازه قیمت به فارسی]
+    • اهرم پیشنهادی: [کراس ۱ تا ۳ برابر]
 
     🚀 اهداف سودآوری:
-    ▫️ TP1: [عدد] 👈 (۵۰٪ خروج + فری‌ریسک)
-    ▫️ TP2: [عدد] 👈 (۳۰٪ خروج)
-    ▫️ TP3: [عدد] 👈 (پوزیشن نهایی)
+    ▫️ هدف اول: [عدد] 👈 (خروج ۵۰٪ حجم و ریسک‌فری)
+    ▫️ هدف دوم: [عدد] 👈 (خروج ۳۰٪ حجم)
+    ▫️ هدف سوم: [عدد] 👈 (تارگت نهایی)
 
-    🛑 حد ضرر (ATR Based): [عدد]
-    ❌ شرط ابطال ستاپ: [توضیح کوتاه فارسی]
+    🛑 مدیریت ریسک و حد ضرر:
+    • حد ضرر: [عدد]
+    • شرط ابطال ستاپ: [توضیح کوتاه فارسی]
 
-    🏛 تحلیل پرایس‌اکشن و نقدینگی (SMC & Wyckoff):
-    • تحلیل FVG و اوردربلاک: [توضیح فارسی کوتاه]
+    🏛 تحلیل ساختاری و نقدینگی:
+    • تحلیل پرایس اکشن و نقدینگی: [توضیح فارسی کوتاه]
     • رادار تله نهنگ: [توضیح فارسی کوتاه]
     """
 
@@ -431,7 +432,7 @@ async def crypto_news_handler(message: types.Message):
     msg = await message.answer("🔄 در حال دریافت آخرین اخبار...")
     raw_news = await fetch_crypto_news()
 
-    prompt = f"این اخبار کریپتو را به صورت تحلیلی و کاملاً فارسی خلاصه کن:\n{raw_news}"
+    prompt = f"این اخبار کریپتو را به صورت تحلیلی، جذاب و کاملاً فارسی خلاصه کن:\n{raw_news}"
     try:
         response_text = await query_gemini(prompt)
         await msg.edit_text(f"📰 **خلاصه اخبار و احساسات بازار:**\n\n{response_text}", parse_mode="Markdown")
@@ -614,7 +615,7 @@ async def handle_text_input(message: types.Message):
         try:
             user["risk_calc_data"]["risk_pct"] = float(text)
             user["state"] = "awaiting_entry"
-            await message.answer("قیمت ورود (Entry):")
+            await message.answer("قیمت ورود:")
         except ValueError:
             await message.answer("لطفاً عدد وارد کنید.")
         return
@@ -623,7 +624,7 @@ async def handle_text_input(message: types.Message):
         try:
             user["risk_calc_data"]["entry"] = float(text)
             user["state"] = "awaiting_sl"
-            await message.answer("قیمت حد ضرر (Stop Loss):")
+            await message.answer("قیمت حد ضرر:")
         except ValueError:
             await message.answer("لطفاً عدد وارد کنید.")
         return
@@ -714,7 +715,7 @@ async def generate_daily_digest():
         news_summary = "تغییرات شدید نوسانی در بازار مشاهده می‌شود."
 
     return (
-        f"☀️ **بولتن تحلیلی روزانه AlphaEngine**\n\n"
+        f"☀️ **بولتن تحلیلی روزانه آلفا‌انجین**\n\n"
         f"🪙 **بیت‌کوین (BTC):** `${btc_price:,.2f}` (`{btc_change:+.2f}%`)\n"
         f"📊 **شاخص ترس و طمع:** {fng_val}/100 ({fng_class})\n\n"
         f"📰 **خلاصه اخبار:**\n{news_summary}\n\n"
