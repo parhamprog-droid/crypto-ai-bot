@@ -37,11 +37,11 @@ gemini_model = genai.GenerativeModel("gemini-1.5-flash")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ذخیره اعضا و سیستم رفرال در حافظه
+# ذخیره کاربران برای ارسال هشدارهای پس‌زمینه
 subscribers = set()
 
 # ---------------------------------------------------------
-# وب‌سرور داخلی جهت رفع هشدار Port Binding در Render
+# وب‌سرور داخلی جهت رفع خطای Port Binding در Render
 # ---------------------------------------------------------
 async def handle_health_check(request):
     return web.Response(text="AlphaEngine Pro Bot & Pump Scanner is Active!")
@@ -56,7 +56,7 @@ async def start_web_server():
     logging.info(f"🌐 Healthcheck web server listening on port {PORT}")
 
 # ---------------------------------------------------------
-# تابع ارسال متون طولانی (جلوگیری از ارور ۴۰۹۶ کاراکتر تلگرام)
+# مدیریت محدودیت طول پیام در تلگرام (۴۰۹۶ کاراکتر)
 # ---------------------------------------------------------
 async def send_long_message(event: types.Message | types.CallbackQuery, text: str, parse_mode: str = "Markdown"):
     target = event.message if isinstance(event, CallbackQuery) else event
@@ -78,7 +78,7 @@ async def send_long_message(event: types.Message | types.CallbackQuery, text: st
         await asyncio.sleep(0.3)
 
 # ---------------------------------------------------------
-# موتور محاسبه اندیکاتورها و دیتای زنده بازار (CCXT + Pandas)
+# موتور تحلیل بازار و اندیکاتورهای تکنیکال (CCXT + Pandas)
 # ---------------------------------------------------------
 async def fetch_market_data(symbol: str, timeframe: str = "1h", limit: int = 100):
     exchange = ccxt.binance({'enableRateLimit': True, 'timeout': 10000})
@@ -113,13 +113,13 @@ async def fetch_market_data(symbol: str, timeframe: str = "1h", limit: int = 100
         df['MACD'] = exp1 - exp2
         df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
 
-        # ۴. محاسبه باند بولینگر (Bollinger Bands)
+        # ۴. محاسبه باندهای بولینگر (Bollinger Bands)
         df['SMA_20'] = df['close'].rolling(window=20).mean()
         df['STD_20'] = df['close'].rolling(window=20).std()
         df['BB_Upper'] = df['SMA_20'] + (df['STD_20'] * 2)
         df['BB_Lower'] = df['SMA_20'] - (df['STD_20'] * 2)
 
-        # ۵. محاسبه ATR (Average True Range)
+        # ۵. محاسبه ATR
         df['TR'] = np.maximum(
             df['high'] - df['low'],
             np.maximum(
@@ -129,7 +129,7 @@ async def fetch_market_data(symbol: str, timeframe: str = "1h", limit: int = 100
         )
         df['ATR'] = df['TR'].rolling(window=14).mean()
 
-        # ۶. محاسبه جهش حجم (Volume Surge)
+        # ۶. محاسبه ضریب جهش حجم (Volume Surge)
         df['Vol_SMA_20'] = df['volume'].rolling(window=20).mean()
         df['Vol_Surge'] = df['volume'] / df['Vol_SMA_20']
 
@@ -158,12 +158,6 @@ async def fetch_market_data(symbol: str, timeframe: str = "1h", limit: int = 100
             "bb_upper": round(float(last['BB_Upper']), 4),
             "bb_lower": round(float(last['BB_Lower']), 4),
             "atr": round(atr, 4),
-            "long_tp1": round(price + (atr * 1.5), 4),
-            "long_tp2": round(price + (atr * 3.0), 4),
-            "long_sl": round(price - (atr * 1.2), 4),
-            "short_tp1": round(price - (atr * 1.5), 4),
-            "short_tp2": round(price - (atr * 3.0), 4),
-            "short_sl": round(price + (atr * 1.2), 4),
         }
         return stats, None
 
@@ -173,10 +167,9 @@ async def fetch_market_data(symbol: str, timeframe: str = "1h", limit: int = 100
         return None, str(e)
 
 # ---------------------------------------------------------
-# موتور اسکنر پامپ و دامپ بازار (Pump & Dump Scanner)
+# اسکنر پامپ و دامپ بازار
 # ---------------------------------------------------------
 async def scan_market_pumps(top_n: int = 15):
-    """اسکنر زنده صرافی برای شناساگر ارزهای پرنوسان و در حال پامپ"""
     exchange = ccxt.binance({'enableRateLimit': True, 'timeout': 15000})
     try:
         tickers = await exchange.fetch_tickers()
@@ -205,11 +198,10 @@ async def scan_market_pumps(top_n: int = 15):
         logging.error(f"Pump Scanner Error: {e}")
         return [], str(e)
 
-# وظیفه پس‌زمینه ارسال هشدار هوشمند پامپ
 async def background_pump_alert_task():
     while True:
         try:
-            await asyncio.sleep(300)  # بررسی هر ۵ دقیقه
+            await asyncio.sleep(300)
             pumps, err = scan_market_pumps(top_n=5)
             if pumps and subscribers:
                 alert_text = "🚀 **[Hedge Alert] هشدار زنده ارزهای در حال پامپ شدید:**\n\n"
@@ -236,7 +228,6 @@ async def background_pump_alert_task():
 async def cmd_start(message: Message):
     user_id = message.from_user.id
     subscribers.add(user_id)
-
     bot_info = await bot.get_me()
     ref_link = f"https://t.me/{bot_info.username}?start={user_id}"
 
@@ -246,9 +237,8 @@ async def cmd_start(message: Message):
         "🔥 **امکانات فعال در این نسخه:**\n"
         "1️⃣ **اسکنر پامپ و دامپ (`/pump`):** شناسایی زنده ارزهای در حال رشد شدید و جهش حجم.\n"
         "2️⃣ **سیگنال‌ساز اتوماتیک (CCXT + Indicators):** محاسبه زنده RSI, MACD, EMAs, Bollinger Bands, ATR.\n"
-        "3️⃣ **مدیریت ریسک هوشمند:** پیشنهاد نقطه ورود، TP1, TP2, TP3 و SL دقیق بر اساس ATR.\n"
-        "4️⃣ **چارت‌خوان چندزمانی (Vision AI):** تحلیل چارت با هوش مصنوعی در ۴ تایم‌فریم.\n"
-        "5️⃣ **پردازش صوتی استراتژی (Voice AI):** آنالیز مستقیم ویس‌های معاملاتی.\n\n"
+        "3️⃣ **چارت‌خوان چندزمانی (Vision AI):** تحلیل چارت با هوش مصنوعی در ۴ تایم‌فریم.\n"
+        "4️⃣ **پردازش صوتی استراتژی (Voice AI):** آنالیز مستقیم ویس‌های معاملاتی.\n\n"
         "📌 **دستورات کاربردی:**\n"
         "▫️ `/pump` - اسکن زنده ارزهای پامپی بازار\n"
         "▫️ `/scan BTC` - تحلیل زنده تکنیکال و سیگنال نماد\n"
@@ -289,9 +279,7 @@ async def cmd_scan_symbol(message: Message):
     if len(args) < 2:
         await message.answer("⚠️ لطفاً نام نماد را وارد کنید. مثال:\n`/scan BTC` یا `/scan SOL`", parse_mode="Markdown")
         return
-
-    symbol = args[1]
-    await process_symbol_analysis(message, symbol)
+    await process_symbol_analysis(message, args[1])
 
 @dp.message(Command("vip"))
 async def cmd_vip(message: Message):
@@ -315,8 +303,7 @@ async def cmd_help(message: Message):
         "1️⃣ **ارسال نام نماد:** ارسال `SOL`, `ETH`, `BTC` جهت استخراج اندیکاتورها و سیگنال ورود/خروج.\n"
         "2️⃣ **دستور `/pump`:** اسکنر هوشمند ارزهای دارای رشد شدید و جهش حجم.\n"
         "3️⃣ **ارسال عکس چارت:** تحلیل تکنیکال با هوش مصنوعی در تایم‌فریم‌های 15m, 1h, 4h, 1d.\n"
-        "4️⃣ **ارسال ویس:** پردازش و آنالیز صوتی استراتژی معاملاتی شما.\n"
-        "5️⃣ **دستور `/vip`:** دریافت لینک دعوت اختصاصی."
+        "4️⃣ **ارسال ویس:** پردازش و آنالیز صوتی استراتژی معاملاتی شما."
     )
     await message.answer(help_text, parse_mode="Markdown")
 
@@ -338,17 +325,10 @@ async def process_symbol_analysis(message: Message, symbol: str):
             f"📉 EMAs: EMA20={stats['ema_20']} | EMA50={stats['ema_50']} | EMA200={stats['ema_200']}\n"
             f"⚡ MACD: {stats['macd']} | Signal: {stats['macd_signal']}\n"
             f"🌐 باند بولینگر: Upper={stats['bb_upper']} | Lower={stats['bb_lower']}\n"
-            f"🌊 ضریب جهش حجم (Volume Surge): {stats['vol_surge_ratio']}x\n"
-            f"🎯 حد نوسان ATR: {stats['atr']}\n\n"
+            f"🌊 ضریب جهش حجم: {stats['vol_surge_ratio']}x | ATR={stats['atr']}\n\n"
             "با توجه به این مشخصات ریاضی زنده:\n"
             "۱. وضعیت روند کلی و قدرت خریداران/فروشندگان را تحلیل کنید.\n"
-            "۲. اگر حجم شدید یا واگرایی در RSI/MACD وجود دارد بیان کنید.\n"
-            "۳. یک **سیگنال کامل معاملاتی** ارائه دهید شامل:\n"
-            "   - جهت معامله (Long / Short / Wait)\n"
-            "   - محدوده ورود (Entry Zone)\n"
-            "   - حد سودها (TP1, TP2, TP3)\n"
-            "   - حد زیان (Stop Loss)\n"
-            "   - نسبت ریسک به ریوارد (R:R)\n"
+            "۲. یک **سیگنال کامل معاملاتی** ارائه دهید شامل جهت معامله (Long/Short)، محدوده ورود، حد سودها (TP1, TP2, TP3) و حد زیان (Stop Loss).\n"
             "پاسخ را بسیار خوانا، شکیل و با تیتربندی کامل ارائه دهید."
         )
     else:
@@ -363,7 +343,7 @@ async def process_symbol_analysis(message: Message, symbol: str):
         await status_msg.edit_text(f"⚠️ خطایی در پردازش رخ داد:\n`{e}`", parse_mode="Markdown")
 
 # ---------------------------------------------------------
-# پردازش متون، تصاویر و ویس‌ها
+# پردازش پیام‌های متنی، تصاویر و ویس‌ها
 # ---------------------------------------------------------
 @dp.message(F.text & ~F.command)
 async def handle_text(message: Message):
@@ -399,13 +379,12 @@ async def handle_photo(message: Message):
 async def handle_timeframe_click(callback: CallbackQuery):
     tf = callback.data.split("_")[1]
     await callback.answer(f"تایم‌فریم {tf} انتخاب شد.")
-
     status_msg = await callback.message.answer(f"🧠 در حال تحلیل تصویر چارت در تایم‌فریم {tf}...")
 
     try:
         photo_msg = callback.message.reply_to_message or callback.message
         if not photo_msg.photo:
-            await status_msg.edit_text("❌ تصویر چارت یافت نشد. لطفاً عکس را مجدداً بفرستید.")
+            await status_msg.edit_text("❌ تصویر چارت یافت نشد.")
             return
 
         photo = photo_msg.photo[-1]
@@ -414,7 +393,7 @@ async def handle_timeframe_click(callback: CallbackQuery):
 
         prompt = (
             f"شما تحلیل‌گر ارشد پرایس‌اکشن هستید. این تصویر یک چارت کریپتو در تایم‌فریم {tf} است.\n"
-            "تحلیل کاملی شامل الگوها، حمایت/مقاومت، کندل‌های کلیدی و پیشنهاد خرید/فروش ارائه دهید."
+            "تحلیل کاملی شامل الگوها، حمایت/مقاومت، و پیشنهاد خرید/فروش ارائه دهید."
         )
 
         response = gemini_model.generate_content([
@@ -456,18 +435,18 @@ async def handle_voice(message: Message):
         await status_msg.edit_text(f"⚠️ خطایی در تحلیل ویس رخ داد:\n`{e}`", parse_mode="Markdown")
 
 # ---------------------------------------------------------
-# راه اندازی اصلی (Main)
+# اجرای اصلی برنامه (Main)
 # ---------------------------------------------------------
 async def main():
     logging.info("🚀 Starting AlphaEngine Pro Suite & Pump Scanner...")
 
-    # ۱. راه اندازی وب‌سرور برای Port Binding در Render
+    # ۱. راه اندازی وب‌سرور داخلی جهت رفع خطای پورت Render
     asyncio.create_task(start_web_server())
 
     # ۲. فعال‌سازی اسکنر پس‌زمینه هشدارهای پامپ
     asyncio.create_task(background_pump_alert_task())
 
-    # ۳. شروع دریافت پیام‌ها از تلگرام
+    # ۳. آغاز دریافت پیام‌ها از تلگرام
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
