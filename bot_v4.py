@@ -24,9 +24,13 @@ from aiohttp import web
 # تنظیمات لاگینگ
 logging.basicConfig(level=logging.INFO)
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# پشتیبانی از هر دو نام متغیر محیطی برای جلوگیری از خطای توکن
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "8800494482"))
+
+if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
+    raise ValueError("❌ متغیرهای TELEGRAM_BOT_TOKEN یا GEMINI_API_KEY در تنظیمات یافت نشدند.")
 
 genai.configure(api_key=GEMINI_API_KEY)
 
@@ -53,9 +57,6 @@ def get_user(user_id: int):
 # --- فراخوانی جمینای با پشتیبان هوشمند ---
 async def query_gemini(prompt: str) -> str:
     preferred_models = [
-        "gemini-3.5-flash",
-        "gemini-3.5-flash-lite",
-        "gemini-2.0-flash",
         "gemini-1.5-flash",
         "gemini-1.5-pro",
         "gemini-pro"
