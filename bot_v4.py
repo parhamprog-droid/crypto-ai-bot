@@ -35,7 +35,6 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_ID_RAW = os.getenv("ADMIN_ID", "0")
 
-# --- اعتبارسنجی ENV ---
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("❌ ENV 'TELEGRAM_BOT_TOKEN' or 'BOT_TOKEN' is not set!")
 if not GEMINI_API_KEY:
@@ -68,6 +67,47 @@ PERSIAN_SYSTEM_INSTRUCTION = (
     "نمونه درست: «روند 4H صعودی است و RSI روی 65 قرار دارد. Entry مناسب در محدوده Long با SL زیر 63000.»"
 )
 
+# --- لیست داینامیک مدل‌های Gemini ---
+_AVAILABLE_GEMINI_MODELS = None
+
+
+async def get_available_models():
+    """دریافت لیست مدل‌های موجود Gemini که از generateContent پشتیبانی می‌کنند."""
+    global _AVAILABLE_GEMINI_MODELS
+    if _AVAILABLE_GEMINI_MODELS is not None:
+        return _AVAILABLE_GEMINI_MODELS
+
+    preferred = [
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite",
+    ]
+    try:
+        response = await asyncio.to_thread(gemini_client.models.list)
+        dynamic = []
+        for m in response:
+            try:
+                if hasattr(m, "supported_actions") and m.supported_actions:
+                    if "generateContent" in m.supported_actions:
+                        name = m.name.replace("models/", "")
+                        dynamic.append(name)
+                elif hasattr(m, "supported_generation_methods") and m.supported_generation_methods:
+                    if "generateContent" in m.supported_generation_methods:
+                        name = m.name.replace("models/", "")
+                        dynamic.append(name)
+            except Exception:
+                continue
+
+        combined = list(dict.fromkeys(preferred + dynamic))
+        _AVAILABLE_GEMINI_MODELS = combined
+        logging.info(f"✅ Available Gemini models: {combined[:5]}...")
+        return combined
+    except Exception as e:
+        logging.warning(f"ListModels failed: {e}. Using hardcoded preferred list.")
+        _AVAILABLE_GEMINI_MODELS = preferred
+        return preferred
+
 
 def get_user(user_id: int):
     if user_id not in user_data:
@@ -84,16 +124,12 @@ def get_user(user_id: int):
     return user_data[user_id]
 
 
-# --- فراخوانی Gemini با SDK جدید ---
+# --- فراخوانی Gemini با SDK جدید + ListModels ---
 async def query_gemini(prompt: str) -> str:
-    preferred_models = [
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-1.5-pro",
-    ]
+    candidate_models = await get_available_models()
 
     last_error = None
-    for model_name in preferred_models:
+    for model_name in candidate_models:
         try:
             response = await asyncio.to_thread(
                 gemini_client.models.generate_content,
@@ -107,8 +143,14 @@ async def query_gemini(prompt: str) -> str:
             if response and response.text:
                 return response.text
         except Exception as e:
+            err_str = str(e)
             last_error = e
-            logging.warning(f"Gemini model '{model_name}' failed: {type(e).__name__}: {e}")
+            logging.warning(f"Gemini model '{model_name}' failed: {type(e).__name__}: {err_str[:200]}")
+            # اگه ارور 404 بود، مدل رو از کش حذف کن
+            if "404" in err_str or "NOT_FOUND" in err_str:
+                global _AVAILABLE_GEMINI_MODELS
+                if _AVAILABLE_GEMINI_MODELS and model_name in _AVAILABLE_GEMINI_MODELS:
+                    _AVAILABLE_GEMINI_MODELS.remove(model_name)
             continue
 
     raise last_error or Exception("هیچ‌کدام از مدل‌های Gemini پاسخ ندادند.")
@@ -188,7 +230,11 @@ async def get_crypto_dataframe(symbol="BTC/USDT", timeframe="1h", limit=100):
         df['BB_Width'] = (df['BB_Upper'] - df['BB_Lower']) / df['BB_Middle']
 
         df['FVG_Bullish'] = (df['Low'] > df['High'].shift(2))
-        df['OrderBlock_Bullish'] = (df['Close'] > df['Open']) & (df['Close'].shift(1) < df['Open'].shift(1)) & (df['Volume'] > df['Volume'].rolling(10).mean() * 1.5)
+        df['OrderBlock_Bullish'] = (
+            (df['Close'] > df['Open'])
+            & (df['Close'].shift(1) < df['Open'].shift(1))
+            & (df['Volume'] > df['Volume'].rolling(10).mean() * 1.5)
+        )
 
         return formatted_symbol, df
     except Exception as e:
@@ -283,7 +329,8 @@ async def fetch_dex_tokens():
                         raw_price = float(attr.get("base_token_price_usd") or 0)
                         formatted_price = f"{raw_price:.6f}".rstrip('0').rstrip('.') if raw_price > 0 else "0"
                         filtered.append({"symbol": symbol, "price": formatted_price})
-                        if len(filtered) >= 5: break
+                        if len(filtered) >= 5:
+                            break
                     return filtered
         except Exception as e:
             logging.error(f"Gecko Error: {e}")
@@ -292,13 +339,18 @@ async def fetch_dex_tokens():
 
 def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
     clean_symbol = symbol.replace("/", "")
-    fig, (ax_main, ax_rsi) = plt.subplots(2, 1, figsize=(11, 6.5), gridspec_kw={'height_ratios': [3, 1]}, facecolor='#f8f9fa')
+    fig, (ax_main, ax_rsi) = plt.subplots(
+        2, 1, figsize=(11, 6.5),
+        gridspec_kw={'height_ratios': [3, 1]},
+        facecolor='#f8f9fa'
+    )
     ax_main.set_facecolor('#ffffff')
     ax_rsi.set_facecolor('#ffffff')
 
     n = len(df)
     for i in range(n):
-        open_p, close_p, high_p, low_p = df['Open'].iloc[i], df['Close'].iloc[i], df['High'].iloc[i], df['Low'].iloc[i]
+        open_p, close_p = df['Open'].iloc[i], df['Close'].iloc[i]
+        high_p, low_p = df['High'].iloc[i], df['Low'].iloc[i]
         color = '#089981' if close_p >= open_p else '#f23645'
         ax_main.plot([i, i], [low_p, high_p], color=color, linewidth=1)
         ax_main.bar(i, abs(close_p - open_p), bottom=min(open_p, close_p), color=color, width=0.6)
@@ -308,10 +360,17 @@ def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> byte
 
     last_price = df['Close'].iloc[-1]
     ax_main.axhline(y=last_price, color='red', linestyle='--', linewidth=1)
-    ax_main.text(n-1, last_price, f" {last_price:.4f}", color='white', backgroundcolor='red', fontsize=8, fontweight='bold', va='center')
+    ax_main.text(
+        n - 1, last_price, f" {last_price:.4f}",
+        color='white', backgroundcolor='red',
+        fontsize=8, fontweight='bold', va='center'
+    )
 
     ax_main.grid(True, linestyle='--', alpha=0.5, color='#e0e0e0')
-    ax_main.set_title(f"{clean_symbol} {timeframe} - Multi-Timeframe AlphaEngine Pro", fontsize=12, fontweight='bold', pad=10)
+    ax_main.set_title(
+        f"{clean_symbol} {timeframe} - Multi-Timeframe AlphaEngine Pro",
+        fontsize=12, fontweight='bold', pad=10
+    )
     ax_main.legend(loc='upper left', fontsize=8)
     ax_main.yaxis.tick_right()
 
@@ -344,7 +403,13 @@ async def generate_signal(symbol: str, timeframe: str):
     trend_4h = "صعودی 🟢" if (df_4h is not None and df_4h['Close'].iloc[-1] > df_4h['EMA_50'].iloc[-1]) else "نزولی 🔴"
     btc_bullish = (df_btc is not None and df_btc['Close'].iloc[-1] > df_btc['EMA_50'].iloc[-1])
 
-    df['TR'] = np.maximum(df['High'] - df['Low'], np.maximum(abs(df['High'] - df['Close'].shift(1)), abs(df['Low'] - df['Close'].shift(1))))
+    df['TR'] = np.maximum(
+        df['High'] - df['Low'],
+        np.maximum(
+            abs(df['High'] - df['Close'].shift(1)),
+            abs(df['Low'] - df['Close'].shift(1))
+        )
+    )
     df['ATR'] = df['TR'].rolling(window=14).mean()
     atr_val = round(float(df['ATR'].iloc[-1]), 4)
 
@@ -433,18 +498,27 @@ async def handle_voice_message(message: types.Message):
                 "⚠️ توضیحات را فارسی بنویس، اما نام ارزها، اصطلاحات تکنیکال و مفاهیم ترید را انگلیسی نگه دار. "
                 "اگر کاربر انگلیسی حرف زد، تو باز به فارسی (با اصطلاحات انگلیسی) جواب بده."
             )
-            resp = gemini_client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=[uploaded, prompt],
-                config=genai_types.GenerateContentConfig(
-                    system_instruction=PERSIAN_SYSTEM_INSTRUCTION,
-                ),
-            )
-            try:
-                gemini_client.files.delete(name=uploaded.name)
-            except Exception:
-                pass
-            return resp.text if resp else None
+
+            # استفاده از همون مدل در دسترس
+            models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro"]
+            last_exc = None
+            for m_name in models_to_try:
+                try:
+                    resp = gemini_client.models.generate_content(
+                        model=m_name,
+                        contents=[uploaded, prompt],
+                        config=genai_types.GenerateContentConfig(
+                            system_instruction=PERSIAN_SYSTEM_INSTRUCTION,
+                        ),
+                    )
+                    if resp and resp.text:
+                        return resp.text
+                except Exception as ex:
+                    last_exc = ex
+                    continue
+            if last_exc:
+                raise last_exc
+            return None
 
         response_text = await asyncio.to_thread(_upload_and_analyze)
 
@@ -483,7 +557,10 @@ async def start_cmd(message: types.Message):
                 if len(referrer["referrals"]) >= 3 and not referrer["is_vip"]:
                     referrer["is_vip"] = True
                     try:
-                        await bot.send_message(referrer_id, "🎉 **تبریک!** ۳ کاربر جدید دعوت کردید و حساب شما **VIP** شد!")
+                        await bot.send_message(
+                            referrer_id,
+                            "🎉 **تبریک!** ۳ کاربر جدید دعوت کردید و حساب شما **VIP** شد!"
+                        )
                     except Exception as e:
                         logging.warning(f"Failed to notify referrer: {e}")
 
@@ -498,7 +575,8 @@ async def start_cmd(message: types.Message):
         f"🔰 **وضعیت حساب:** `{status_text}`\n"
         f"📡 **وضعیت اتصال:** آنلاین 🟢\n\n"
         f"💡 **راهنمای سریع:**\n"
-        f"برای دریافت ستاپ معاملاتی و چارت تحلیلی، کافی است **نام نماد** (مانند `BTC` یا `SOL`) را ارسال کرده یا ویس بفرستید.\n\n"
+        f"برای دریافت ستاپ معاملاتی و چارت تحلیلی، کافی است **نام نماد** "
+        f"(مانند `BTC` یا `SOL`) را ارسال کرده یا ویس بفرستید.\n\n"
         f"🎁 **ارتقا به سطح VIP:**\n"
         f"با دعوت ۳ دوست، دسترسی VIP را به صورت رایگان دریافت کنید.\n"
         f"🔗 **لینک دعوت اختصاصی:**\n`{ref_link}`\n\n"
@@ -614,7 +692,11 @@ async def fear_and_greed(message: types.Message):
             if resp.status == 200:
                 data = await resp.json()
                 item = data["data"][0]
-                await message.answer(f"📊 **شاخص ترس و طمع:**\n\n🎯 عدد: **{item['value']}/100**\n📌 وضعیت: **{item['value_classification']}**")
+                await message.answer(
+                    f"📊 **شاخص ترس و طمع:**\n\n"
+                    f"🎯 عدد: **{item['value']}/100**\n"
+                    f"📌 وضعیت: **{item['value_classification']}**"
+                )
 
 
 @dp.message(F.text == "🧮 محاسبه ریسک")
@@ -653,9 +735,16 @@ async def handle_timeframe_click(callback: types.CallbackQuery):
         if chart_bytes:
             photo_file = BufferedInputFile(chart_bytes, filename=f"{symbol}.png")
             try:
-                await callback.message.answer_photo(photo=photo_file, caption=f"📊 **چارت {symbol} ({tf})**", parse_mode="Markdown")
+                await callback.message.answer_photo(
+                    photo=photo_file,
+                    caption=f"📊 **چارت {symbol} ({tf})**",
+                    parse_mode="Markdown"
+                )
             except Exception:
-                await callback.message.answer_photo(photo=photo_file, caption=f"📊 چارت {symbol} ({tf})")
+                await callback.message.answer_photo(
+                    photo=photo_file,
+                    caption=f"📊 چارت {symbol} ({tf})"
+                )
 
         if signal_text:
             try:
@@ -691,7 +780,7 @@ async def handle_text_input(message: types.Message):
             exchange = ccxt.coinex()
             try:
                 ticker = await exchange.fetch_ticker(symbol)
-                current_p = ticker['last'] if 'last' in ticker else ticker['close']
+                current_p = ticker.get('last') or ticker.get('close')
             finally:
                 try:
                     await exchange.close()
@@ -772,13 +861,18 @@ async def handle_text_input(message: types.Message):
     ]:
         return
 
-    await message.answer(f"⏱ تایم‌فریم تحلیل **{symbol_text}** را انتخاب کنید:", reply_markup=timeframe_keyboard(symbol_text))
+    await message.answer(
+        f"⏱ تایم‌فریم تحلیل **{symbol_text}** را انتخاب کنید:",
+        reply_markup=timeframe_keyboard(symbol_text)
+    )
 
 
 # --- رادار پامپ/دامپ ---
 async def pump_dump_detector_loop():
-    tracked_symbols = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT',
-                       'ADA/USDT', 'AVAX/USDT', 'LINK/USDT', 'SUI/USDT', 'PEPE/USDT']
+    tracked_symbols = [
+        'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT',
+        'ADA/USDT', 'AVAX/USDT', 'LINK/USDT', 'SUI/USDT', 'PEPE/USDT'
+    ]
     last_alerts = {}
 
     while True:
@@ -794,13 +888,18 @@ async def pump_dump_detector_loop():
                         if len(ohlcv) < 21:
                             continue
 
-                        df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+                        df = pd.DataFrame(
+                            ohlcv,
+                            columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume']
+                        )
                         last_candle = df.iloc[-1]
                         prev_candles = df.iloc[:-1]
 
                         avg_vol = prev_candles['Volume'].mean()
                         current_vol = last_candle['Volume']
-                        price_change_pct = ((last_candle['Close'] - last_candle['Open']) / last_candle['Open']) * 100
+                        price_change_pct = (
+                            (last_candle['Close'] - last_candle['Open']) / last_candle['Open']
+                        ) * 100
 
                         is_volume_spike = (current_vol >= avg_vol * 4) and (avg_vol > 0)
 
@@ -864,7 +963,8 @@ async def generate_daily_digest():
     raw_news = await fetch_crypto_news()
     prompt = (
         f"یک خلاصه بسیار کوتاه (حداکثر ۳ سطر) از مهم‌ترین اخبار کریپتو ارائه بده:\n{raw_news}\n\n"
-        "⚠️ توضیحات را فارسی بنویس، اما نام ارزها و اصطلاحات (ETF, DeFi, Whale, Halving) را انگلیسی نگه دار."
+        "⚠️ توضیحات را فارسی بنویس، اما نام ارزها و اصطلاحات "
+        "(ETF, DeFi, Whale, Halving) را انگلیسی نگه دار."
     )
     try:
         news_summary = await query_gemini(prompt)
@@ -913,10 +1013,16 @@ async def background_alert_checker():
                         ticker = await exchange.fetch_ticker(symbol)
                         current_price = ticker.get('last') or ticker.get('close')
 
-                        if (condition == "above" and current_price >= target) or (condition == "below" and current_price <= target):
+                        if ((condition == "above" and current_price >= target)
+                                or (condition == "below" and current_price <= target)):
                             await bot.send_message(
                                 chat_id=alert['user_id'],
-                                text=f"🚨 **هشدار قیمت رسید!**\n\n🪙 ارز: **{symbol}**\n🎯 هدف: `${target}`\n💵 فعلی: `${current_price}`",
+                                text=(
+                                    f"🚨 **هشدار قیمت رسید!**\n\n"
+                                    f"🪙 ارز: **{symbol}**\n"
+                                    f"🎯 هدف: `${target}`\n"
+                                    f"💵 فعلی: `${current_price}`"
+                                ),
                                 parse_mode="Markdown"
                             )
                             price_alerts.remove(alert)
