@@ -38,7 +38,6 @@ class SensitiveFilter(logging.Filter):
         (re.compile(r'(AQ\.[A-Za-z0-9_\-]+)'), r'***'),
         (re.compile(r'(npg_[A-Za-z0-9]+)'), r'***'),
     ]
-
     def filter(self, record):
         try:
             msg = record.getMessage()
@@ -49,7 +48,6 @@ class SensitiveFilter(logging.Filter):
         except Exception:
             pass
         return True
-
 
 logging.basicConfig(
     level=logging.INFO,
@@ -67,6 +65,8 @@ PAYMENT_CARD = os.getenv("PAYMENT_CARD", "0000-0000-0000-0000")
 PAYMENT_HOLDER = os.getenv("PAYMENT_HOLDER", "نام صاحب کارت")
 PAYMENT_AMOUNT = int(os.getenv("PAYMENT_AMOUNT", "100000"))
 VIP_PRICE_TOMAN = os.getenv("VIP_PRICE_TOMAN", "100,000")
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@AlphaEngine_Official")
+CHANNEL_LINK = os.getenv("CHANNEL_LINK", "https://t.me/AlphaEngine_Official")
 
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("❌ ENV 'TELEGRAM_BOT_TOKEN' or 'BOT_TOKEN' is not set!")
@@ -104,13 +104,14 @@ RATE_LIMIT_PER_MINUTE = 5
 MARKET_CACHE_TTL = 60
 MIN_PUMP_VOLUME_USD = 500000
 VIP_DURATION_DAYS = 30
-FREE_VIP_DAYS = 7       # کد تخفیف = ۷ روز VIP رایگان
-POINTS_FOR_VIP = 10     # ۱۰ امتیاز = ۷ روز VIP
-POINTS_PER_ANALYSIS = 1 # هر تحلیل +۱
-POINTS_PER_REFERRAL = 5 # هر دعوت +۵
+FREE_VIP_DAYS = 7
+POINTS_FOR_VIP = 10
+POINTS_PER_ANALYSIS = 1
+POINTS_PER_REFERRAL = 5
 SYSTEM_SETTINGS = {
     "pump_detector_enabled": True,
     "daily_digest_enabled": True,
+    "channel_broadcast_enabled": True,
 }
 
 # --- دستور سیستمی ---
@@ -219,6 +220,14 @@ async def init_db():
                 CREATE INDEX IF NOT EXISTS idx_payment_status ON payment_requests(status);
             """)
 
+            # ✅ Migration: اضافه کردن ستون‌های جدید به جدول‌های موجود
+            try:
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS vip_until TIMESTAMP;")
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS points INTEGER DEFAULT 0;")
+                logging.info("✅ Migrations applied successfully")
+            except Exception as e:
+                logging.warning(f"Migration warning: {e}")
+
             for k, v in SYSTEM_SETTINGS.items():
                 await conn.execute("""
                     INSERT INTO system_settings (key, value)
@@ -244,9 +253,9 @@ async def db_get_or_create_user(user_id: int) -> dict:
         else:
             await conn.execute("UPDATE users SET last_seen = NOW() WHERE user_id = $1", user_id)
 
-        # چک انقضای VIP
         is_vip = row["is_vip"]
-        if is_vip and row["vip_until"] and row["vip_until"] < datetime.datetime.now():
+        vip_until = row.get("vip_until")
+        if is_vip and vip_until and vip_until < datetime.datetime.now():
             is_vip = False
             await conn.execute("UPDATE users SET is_vip = FALSE WHERE user_id = $1", user_id)
 
@@ -256,10 +265,10 @@ async def db_get_or_create_user(user_id: int) -> dict:
         return {
             "user_id": row["user_id"],
             "is_vip": is_vip,
-            "vip_until": row["vip_until"],
-            "referred_by": row["referred_by"],
-            "points": row["points"] or 0,
-            "usage_count": row["usage_count"],
+            "vip_until": vip_until,
+            "referred_by": row.get("referred_by"),
+            "points": row.get("points") or 0,
+            "usage_count": row.get("usage_count") or 0,
             "referrals": [r["referred_id"] for r in referrals],
         }
 
@@ -280,7 +289,6 @@ async def db_set_vip(user_id: int, is_vip: bool, days: int = 0):
 
 
 async def db_extend_vip(user_id: int, days: int):
-    """افزودن روز به VIP موجود یا فعال‌سازی جدید"""
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT vip_until FROM users WHERE user_id = $1", user_id)
         now = datetime.datetime.now()
@@ -344,7 +352,6 @@ async def db_add_referral(referrer_id: int, referred_id: int):
             "UPDATE users SET referred_by = $1 WHERE user_id = $2 AND referred_by IS NULL",
             referrer_id, referred_id
         )
-        # +۵ امتیاز برای معرف
         await conn.execute(
             "UPDATE users SET points = COALESCE(points, 0) + $1 WHERE user_id = $2",
             POINTS_PER_REFERRAL, referrer_id
@@ -499,15 +506,6 @@ async def db_get_pending_payments() -> list:
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT * FROM payment_requests WHERE status = 'pending' ORDER BY created_at DESC"
-        )
-        return [dict(r) for r in rows]
-
-
-async def db_get_user_payments(user_id: int, limit: int = 10) -> list:
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM payment_requests WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2",
-            user_id, limit
         )
         return [dict(r) for r in rows]
 
@@ -693,7 +691,7 @@ def get_main_keyboard(user_id: int):
             [KeyboardButton(text="📊 شاخص ترس و طمع"), KeyboardButton(text="🧮 محاسبه ریسک")],
             [KeyboardButton(text="💎 خرید VIP"), KeyboardButton(text="🎁 کد اشتراک")],
             [KeyboardButton(text="⭐ امتیاز من"), KeyboardButton(text="👤 حساب کاربری")],
-            [KeyboardButton(text="👥 سیستم دعوت و هدیه")],
+            [KeyboardButton(text="📢 کانال ما"), KeyboardButton(text="👥 سیستم دعوت و هدیه")],
         ],
         resize_keyboard=True
     )
@@ -707,7 +705,7 @@ def get_admin_keyboard(user_id: int):
             [KeyboardButton(text="🔔 هشدار قیمت"), KeyboardButton(text="📰 اخبار و تحلیل احساسات")],
             [KeyboardButton(text="📊 شاخص ترس و طمع"), KeyboardButton(text="🧮 محاسبه ریسک")],
             [KeyboardButton(text="💎 خرید VIP"), KeyboardButton(text="🎁 کد اشتراک")],
-            [KeyboardButton(text="👤 حساب کاربری")],
+            [KeyboardButton(text="📢 کانال ما"), KeyboardButton(text="👤 حساب کاربری")],
             [KeyboardButton(text="⚙️ پنل ادمین")],
         ],
         resize_keyboard=True
@@ -830,9 +828,11 @@ def admin_alerts_keyboard():
 def admin_settings_keyboard():
     pump_status = "🟢 روشن" if SYSTEM_SETTINGS["pump_detector_enabled"] else "🔴 خاموش"
     digest_status = "🟢 روشن" if SYSTEM_SETTINGS["daily_digest_enabled"] else "🔴 خاموش"
+    channel_status = "🟢 روشن" if SYSTEM_SETTINGS.get("channel_broadcast_enabled", True) else "🔴 خاموش"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"🚀 رادار پامپ/دامپ: {pump_status}", callback_data="admin:toggle_pump")],
         [InlineKeyboardButton(text=f"☀️ بولتن روزانه: {digest_status}", callback_data="admin:toggle_digest")],
+        [InlineKeyboardButton(text=f"📢 ارسال به کانال: {channel_status}", callback_data="admin:toggle_channel")],
         [InlineKeyboardButton(text="🔙 بازگشت", callback_data="admin:back")],
     ])
 
@@ -1031,6 +1031,29 @@ async def get_ticker_price(symbol: str) -> float:
             await exchange.close()
         except Exception:
             pass
+
+
+async def send_to_channel(text: str, photo_bytes: bytes = None):
+    """ارسال پیام به کانال (اگه فعال باشه)"""
+    try:
+        settings = await db_get_settings()
+        if not settings.get("channel_broadcast_enabled", True):
+            return
+        if photo_bytes:
+            await bot.send_photo(
+                chat_id=CHANNEL_USERNAME,
+                photo=BufferedInputFile(photo_bytes, filename="chart.png"),
+                caption=text[:1024],
+                parse_mode="Markdown"
+            )
+        else:
+            await bot.send_message(
+                chat_id=CHANNEL_USERNAME,
+                text=text,
+                parse_mode="Markdown"
+            )
+    except Exception as e:
+        logging.warning(f"Channel broadcast failed: {type(e).__name__}: {e}")
 
 
 # ============================================================
@@ -1342,8 +1365,24 @@ async def start_cmd(message: types.Message):
         f"📡 **وضعیت اتصال:** آنلاین 🟢\n\n"
         f"💡 **راهنمای سریع:**\n"
         f"برای دریافت ستاپ معاملاتی و چارت تحلیلی، کافی است **نام نماد** "
-        f"(مانند `BTC` یا `SOL`) را ارسال کرده یا ویس بفرستید.",
+        f"(مانند `BTC` یا `SOL`) را ارسال کرده یا ویس بفرستید.\n\n"
+        f"📢 **کانال ما:** {CHANNEL_LINK}",
         reply_markup=get_user_kb(user_id),
+        parse_mode="Markdown"
+    )
+
+
+# ============================================================
+# ==================== کانال ================================
+# ============================================================
+
+@dp.message(F.text == "📢 کانال ما")
+async def channel_link_handler(message: types.Message):
+    await message.answer(
+        f"📢 **کانال رسمی AlphaEngine**\n\n"
+        f"برای دنبال کردن سیگنال‌ها، اخبار و تحلیل‌های روزانه:\n\n"
+        f"🔗 {CHANNEL_LINK}\n\n"
+        f"💡 توی کانال، سیگنال‌های عمومی و اخبار مهم منتشر میشه.",
         parse_mode="Markdown"
     )
 
@@ -1655,6 +1694,7 @@ async def vip_redeem_points(callback: types.CallbackQuery):
         parse_mode="Markdown"
     )
 
+
 # ============================================================
 # ==================== کد اشتراک ============================
 # ============================================================
@@ -1767,9 +1807,12 @@ async def payment_callbacks(callback: types.CallbackQuery):
             )
         except Exception:
             pass
-        await callback.message.edit_caption(
-            caption=(callback.message.caption or "") + "\n\n✅ **تأیید شد**",
-        )
+        try:
+            await callback.message.edit_caption(
+                caption=(callback.message.caption or "") + "\n\n✅ **تأیید شد**",
+            )
+        except Exception:
+            pass
 
     elif action == "reject":
         await db_update_payment_request(req_id, "rejected")
@@ -1793,7 +1836,6 @@ async def payment_callbacks(callback: types.CallbackQuery):
 
     elif action == "later":
         await callback.answer("⏸ بعداً بررسی می‌کنی.", show_alert=True)
-
 
 # ============================================================
 # ==================== پنل ادمین ============================
@@ -1860,6 +1902,7 @@ async def admin_callbacks(callback: types.CallbackQuery):
         settings = await db_get_settings()
         pump = "🟢" if settings.get("pump_detector_enabled") else "🔴"
         digest = "🟢" if settings.get("daily_digest_enabled") else "🔴"
+        channel = "🟢" if settings.get("channel_broadcast_enabled", True) else "🔴"
         text = (
             f"📊 **آمار کلی بات**\n\n"
             f"👥 کل کاربران: **{c['total']}**\n"
@@ -1871,7 +1914,8 @@ async def admin_callbacks(callback: types.CallbackQuery):
             f"📅 فعال امروز: **{c['today']}**\n\n"
             f"⚙️ **وضعیت سیستم:**\n"
             f"🚀 رادار پامپ/دامپ: {pump}\n"
-            f"☀️ بولتن روزانه: {digest}"
+            f"☀️ بولتن روزانه: {digest}\n"
+            f"📢 ارسال به کانال: {channel}"
         )
         await db_log_admin(user_id, "Viewed stats")
         try:
@@ -1914,7 +1958,7 @@ async def admin_callbacks(callback: types.CallbackQuery):
         else:
             text = f"💎 **کاربران VIP ({len(users)}):**\n\n"
             for u in users:
-                until = u["vip_until"].strftime('%Y-%m-%d') if u["vip_until"] else "?"
+                until = u["vip_until"].strftime('%Y-%m-%d') if u.get("vip_until") else "?"
                 text += f"💎 `{u['user_id']}` تا `{until}`\n"
         try:
             await callback.message.edit_text(text, reply_markup=admin_back_keyboard(), parse_mode="Markdown")
@@ -1971,16 +2015,14 @@ async def admin_callbacks(callback: types.CallbackQuery):
             )
             return
         text = f"💳 **درخواست‌های VIP در انتظار ({len(pendings)}):**\n\n"
-        text += "هر درخواست به صورت جداگانه با دکمه‌های تأیید/رد ارسال شده."
+        text += "هر درخواست جداگانه با دکمه‌های تأیید/رد ارسال شده."
         await db_log_admin(user_id, "Viewed pending payments")
         try:
             await callback.message.edit_text(text, reply_markup=admin_back_keyboard(), parse_mode="Markdown")
         except Exception:
             await callback.message.answer(text, reply_markup=admin_back_keyboard(), parse_mode="Markdown")
-        # ارسال هر درخواست
         for p in pendings[:5]:
             try:
-                u = await db_get_or_create_user(p["user_id"])
                 cap = (
                     f"💳 **درخواست #{p['id']}**\n\n"
                     f"🆔 کاربر: `{p['user_id']}`\n"
@@ -2140,6 +2182,20 @@ async def admin_callbacks(callback: types.CallbackQuery):
         )
         return
 
+    if action == "toggle_channel":
+        settings = await db_get_settings()
+        new_val = not settings.get("channel_broadcast_enabled", True)
+        await db_set_setting("channel_broadcast_enabled", new_val)
+        SYSTEM_SETTINGS["channel_broadcast_enabled"] = new_val
+        txt = "روشن" if new_val else "خاموش"
+        await db_log_admin(user_id, f"Toggled channel to {txt}")
+        await callback.message.edit_text(
+            f"✅ ارسال به کانال: **{txt}**",
+            reply_markup=admin_settings_keyboard(),
+            parse_mode="Markdown"
+        )
+        return
+
 
 # ============================================================
 # ==================== تایم‌فریم =============================
@@ -2185,7 +2241,6 @@ async def handle_timeframe_click(callback: types.CallbackQuery):
                 except Exception:
                     await callback.message.answer(c)
 
-        # +۱ امتیاز برای تحلیل (فقط غیر ادمین)
         if not is_admin(user_id):
             try:
                 await db_add_points(user_id, POINTS_PER_ANALYSIS)
@@ -2210,7 +2265,6 @@ async def handle_text_input(message: types.Message):
 
     text = message.text.strip()
 
-    # state های ادمین
     if is_admin(user_id) and user_id in admin_state:
         st = admin_state[user_id]
 
@@ -2228,7 +2282,7 @@ async def handle_text_input(message: types.Message):
             banned = await db_is_banned(target_uid)
             vip_tag = "💎 VIP" if user["is_vip"] else "🆓 رایگان"
             ban_tag = "🚫 بن" if banned else "✅ فعال"
-            until = user["vip_until"].strftime('%Y-%m-%d') if user["vip_until"] else "—"
+            until = user["vip_until"].strftime('%Y-%m-%d') if user.get("vip_until") else "—"
             await message.answer(
                 f"👤 **اطلاعات کاربر**\n\n"
                 f"🆔 آیدی: `{target_uid}`\n"
@@ -2262,7 +2316,6 @@ async def handle_text_input(message: types.Message):
             await message.answer(f"✅ پیام به **{count}** کاربر ارسال شد.", parse_mode="Markdown")
             return
 
-    # state های کاربر
     check_state_timeout(user_id)
     st_data = user_cache.get(user_id, {})
     state = st_data.get("state")
@@ -2359,12 +2412,12 @@ async def handle_text_input(message: types.Message):
             await message.answer(f"❌ {result['msg']}")
         return
 
-    # تشخیص نماد
     menu_buttons = [
         "🚀 اسکنر ارزهای پامپی", "🐳 رادار توکن‌های جدید (DEX)",
         "📊 شاخص ترس و طمع", "🧮 محاسبه ریسک", "👤 حساب کاربری",
         "🔔 هشدار قیمت", "📰 اخبار و تحلیل احساسات", "👥 سیستم دعوت و هدیه",
-        "⚙️ پنل ادمین", "💎 خرید VIP", "🎁 کد اشتراک", "⭐ امتیاز من"
+        "⚙️ پنل ادمین", "💎 خرید VIP", "🎁 کد اشتراک", "⭐ امتیاز من",
+        "📢 کانال ما"
     ]
     symbol_text = text.upper()
     if symbol_text.startswith("/") or symbol_text in menu_buttons:
@@ -2430,6 +2483,7 @@ async def pump_dump_detector_loop():
                                         await asyncio.sleep(0.05)
                                     except Exception:
                                         pass
+                            await send_to_channel(alert_msg)
                     except Exception as e:
                         logging.error(f"Pump {symbol}: {e}")
             finally:
@@ -2472,7 +2526,8 @@ async def generate_daily_digest():
         f"☀️ **بولتن روزانه AlphaEngine**\n\n"
         f"🪙 **BTC:** `${btc_price:,.2f}` (`{btc_change:+.2f}%`)\n"
         f"📊 **شاخص ترس و طمع:** {fng_val}/100 ({fng_class})\n\n"
-        f"📰 {news_summary}"
+        f"📰 {news_summary}\n\n"
+        f"📢 {CHANNEL_LINK}"
     )
 
 
@@ -2493,6 +2548,7 @@ async def daily_digest_scheduler():
                         await asyncio.sleep(0.05)
                     except Exception:
                         pass
+                await send_to_channel(digest)
                 await asyncio.sleep(300)
         except Exception as e:
             logging.error(f"Digest loop: {e}")
