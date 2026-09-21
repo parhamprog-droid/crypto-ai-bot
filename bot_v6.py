@@ -81,7 +81,7 @@ except ValueError:
     ADMIN_ID = 0
     logging.warning(f"ADMIN_ID '{ADMIN_ID_RAW}' is not a valid integer. Using 0.")
 
-# --- کلاینت Gemini جدید ---
+# --- کلاینت Gemini ---
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # --- Bot & Dispatcher ---
@@ -220,7 +220,6 @@ async def init_db():
                 CREATE INDEX IF NOT EXISTS idx_payment_status ON payment_requests(status);
             """)
 
-            # ✅ Migration: اضافه کردن ستون‌های جدید به جدول‌های موجود
             try:
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS vip_until TIMESTAMP;")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS points INTEGER DEFAULT 0;")
@@ -477,7 +476,6 @@ async def db_set_setting(key: str, value: bool):
         """, key, str(value).lower())
 
 
-# --- Payment Requests ---
 async def db_create_payment_request(user_id: int, amount: int, receipt_file_id: str) -> int:
     async with db_pool.acquire() as conn:
         rid = await conn.fetchval("""
@@ -510,7 +508,6 @@ async def db_get_pending_payments() -> list:
         return [dict(r) for r in rows]
 
 
-# --- Discount Codes ---
 async def db_create_discount_code(created_by: int, days_valid: int = 7) -> str:
     code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
     expires = datetime.datetime.now() + datetime.timedelta(days=days_valid)
@@ -618,72 +615,7 @@ def cache_set(key: str, data, ttl: int = MARKET_CACHE_TTL):
     market_cache[key] = {"data": data, "expires": time.time() + ttl}
 
 
-# ============================================================
-# ================ لیست داینامیک Gemini ======================
-# ============================================================
-
-async def get_available_models():
-    global _AVAILABLE_GEMINI_MODELS
-    if _AVAILABLE_GEMINI_MODELS is not None:
-        return _AVAILABLE_GEMINI_MODELS
-    preferred = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.0-flash-lite"]
-    try:
-        response = await asyncio.to_thread(gemini_client.models.list)
-        dynamic = []
-        for m in response:
-            try:
-                if hasattr(m, "supported_actions") and m.supported_actions:
-                    if "generateContent" in m.supported_actions:
-                        dynamic.append(m.name.replace("models/", ""))
-                elif hasattr(m, "supported_generation_methods") and m.supported_generation_methods:
-                    if "generateContent" in m.supported_generation_methods:
-                        dynamic.append(m.name.replace("models/", ""))
-            except Exception:
-                continue
-        combined = list(dict.fromkeys(preferred + dynamic))
-        _AVAILABLE_GEMINI_MODELS = combined
-        logging.info(f"✅ Available Gemini models: {combined[:5]}...")
-        return combined
-    except Exception as e:
-        logging.warning(f"ListModels failed: {e}")
-        _AVAILABLE_GEMINI_MODELS = preferred
-        return preferred
-
-
-async def query_gemini(prompt: str) -> str:
-    candidate_models = await get_available_models()
-    last_error = None
-    for model_name in candidate_models:
-        try:
-            response = await asyncio.to_thread(
-                gemini_client.models.generate_content,
-                model=model_name,
-                contents=prompt,
-                config=genai_types.GenerateContentConfig(
-                    system_instruction=PERSIAN_SYSTEM_INSTRUCTION,
-                    temperature=0.7,
-                ),
-            )
-            if response and response.text:
-                return response.text
-        except Exception as e:
-            err_str = str(e)
-            last_error = e
-            logging.warning(f"Gemini '{model_name}' failed: {type(e).__name__}")
-            if "404" in err_str or "NOT_FOUND" in err_str:
-                global _AVAILABLE_GEMINI_MODELS
-                if _AVAILABLE_GEMINI_MODELS and model_name in _AVAILABLE_GEMINI_MODELS:
-                    _AVAILABLE_GEMINI_MODELS.remove(model_name)
-            continue
-    raise last_error or Exception("هیچ‌کدام از مدل‌های Gemini پاسخ ندادند.")
-
-
-# ============================================================
-# ==================== کیبوردها ==============================
-# ============================================================
-
 def get_main_keyboard(user_id: int):
-    """کیبورد اصلی کاربر عادی"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🚀 اسکنر ارزهای پامپی"), KeyboardButton(text="🐳 رادار توکن‌های جدید (DEX)")],
@@ -698,7 +630,6 @@ def get_main_keyboard(user_id: int):
 
 
 def get_admin_keyboard(user_id: int):
-    """کیبورد ادمین — بدون امتیاز و دعوت، با پنل ادمین در ردیف آخر تنها"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🚀 اسکنر ارزهای پامپی"), KeyboardButton(text="🐳 رادار توکن‌های جدید (DEX)")],
@@ -855,6 +786,66 @@ def vip_action_keyboard(target_uid: int, is_vip: bool, is_banned: bool):
         rows.append([InlineKeyboardButton(text="🚫 بن کردن", callback_data=f"admin:ban:{target_uid}")])
     rows.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data="admin:users_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# ============================================================
+# ================ لیست داینامیک Gemini ======================
+# ============================================================
+
+async def get_available_models():
+    global _AVAILABLE_GEMINI_MODELS
+    if _AVAILABLE_GEMINI_MODELS is not None:
+        return _AVAILABLE_GEMINI_MODELS
+    preferred = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.0-flash-lite"]
+    try:
+        response = await asyncio.to_thread(gemini_client.models.list)
+        dynamic = []
+        for m in response:
+            try:
+                if hasattr(m, "supported_actions") and m.supported_actions:
+                    if "generateContent" in m.supported_actions:
+                        dynamic.append(m.name.replace("models/", ""))
+                elif hasattr(m, "supported_generation_methods") and m.supported_generation_methods:
+                    if "generateContent" in m.supported_generation_methods:
+                        dynamic.append(m.name.replace("models/", ""))
+            except Exception:
+                continue
+        combined = list(dict.fromkeys(preferred + dynamic))
+        _AVAILABLE_GEMINI_MODELS = combined
+        logging.info(f"✅ Available Gemini models: {combined[:5]}...")
+        return combined
+    except Exception as e:
+        logging.warning(f"ListModels failed: {e}")
+        _AVAILABLE_GEMINI_MODELS = preferred
+        return preferred
+
+
+async def query_gemini(prompt: str) -> str:
+    candidate_models = await get_available_models()
+    last_error = None
+    for model_name in candidate_models:
+        try:
+            response = await asyncio.to_thread(
+                gemini_client.models.generate_content,
+                model=model_name,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    system_instruction=PERSIAN_SYSTEM_INSTRUCTION,
+                    temperature=0.7,
+                ),
+            )
+            if response and response.text:
+                return response.text
+        except Exception as e:
+            err_str = str(e)
+            last_error = e
+            logging.warning(f"Gemini '{model_name}' failed: {type(e).__name__}")
+            if "404" in err_str or "NOT_FOUND" in err_str:
+                global _AVAILABLE_GEMINI_MODELS
+                if _AVAILABLE_GEMINI_MODELS and model_name in _AVAILABLE_GEMINI_MODELS:
+                    _AVAILABLE_GEMINI_MODELS.remove(model_name)
+            continue
+    raise last_error or Exception("هیچ‌کدام از مدل‌های Gemini پاسخ ندادند.")
 
 
 # ============================================================
@@ -1034,7 +1025,6 @@ async def get_ticker_price(symbol: str) -> float:
 
 
 async def send_to_channel(text: str, photo_bytes: bytes = None):
-    """ارسال پیام به کانال (اگه فعال باشه)"""
     try:
         settings = await db_get_settings()
         if not settings.get("channel_broadcast_enabled", True):
@@ -1044,13 +1034,13 @@ async def send_to_channel(text: str, photo_bytes: bytes = None):
                 chat_id=CHANNEL_USERNAME,
                 photo=BufferedInputFile(photo_bytes, filename="chart.png"),
                 caption=text[:1024],
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
         else:
             await bot.send_message(
                 chat_id=CHANNEL_USERNAME,
                 text=text,
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
     except Exception as e:
         logging.warning(f"Channel broadcast failed: {type(e).__name__}: {e}")
@@ -1129,7 +1119,7 @@ def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> byte
 async def generate_signal(symbol: str, timeframe: str):
     formatted_symbol, df = await get_crypto_dataframe(symbol, timeframe)
     if df is None or df.empty:
-        return f"⚠️ ارز **{escape_md(symbol)}** پیدا نشد.", None
+        return f"⚠️ ارز <b>{symbol}</b> پیدا نشد.", None
 
     results = await asyncio.gather(
         get_crypto_dataframe(symbol, "1d", 30),
@@ -1215,7 +1205,7 @@ async def generate_signal(symbol: str, timeframe: str):
     try:
         response_text = await query_gemini(prompt)
     except Exception as e:
-        return f"⚠️ خطا در تحلیل Gemini:\n`{escape_md(str(e))}`", None
+        return f"⚠️ خطا در تحلیل Gemini:\n<code>{str(e)[:200]}</code>", None
 
     chart_bytes = await asyncio.to_thread(generate_custom_chart, df, formatted_symbol, timeframe)
     return response_text, chart_bytes
@@ -1270,11 +1260,11 @@ async def handle_voice_message(message: types.Message):
 
         response_text = await asyncio.to_thread(_upload_and_analyze)
         if response_text:
-            chunks = chunk_text(f"🗣 **پاسخ دستیار صوتی:**\n\n{response_text}")
+            chunks = chunk_text(f"🗣 <b>پاسخ دستیار صوتی:</b>\n\n{response_text}")
             try:
-                await msg.edit_text(chunks[0], parse_mode="Markdown")
+                await msg.edit_text(chunks[0], parse_mode="HTML")
                 for c in chunks[1:]:
-                    await message.answer(c, parse_mode="Markdown")
+                    await message.answer(c, parse_mode="HTML")
             except Exception:
                 await msg.edit_text(chunks[0])
                 for c in chunks[1:]:
@@ -1283,7 +1273,7 @@ async def handle_voice_message(message: types.Message):
             await msg.edit_text("⚠️ متنی از فایل صوتی تشخیص داده نشد.")
     except Exception as e:
         logging.error(f"Voice error: {type(e).__name__}")
-        await msg.edit_text(f"⚠️ خطا در پردازش فایل صوتی:\n`{escape_md(str(e))}`", parse_mode="Markdown")
+        await msg.edit_text(f"⚠️ خطا در پردازش فایل صوتی:\n<code>{str(e)[:200]}</code>", parse_mode="HTML")
     finally:
         for path in [ogg_filename, wav_filename]:
             try:
@@ -1300,20 +1290,20 @@ async def handle_voice_message(message: types.Message):
 @dp.message(Command("help"))
 async def help_cmd(message: types.Message):
     await message.answer(
-        "📚 **راهنمای بات AlphaEngine**\n\n"
-        "🔹 **تحلیل ارز:** نام نماد رو بفرست (مثل `BTC`)\n"
-        "🔹 **تحلیل صوتی:** یه ویس بفرست\n"
-        "🔹 **هشدار قیمت:** دکمه `🔔 هشدار قیمت`\n"
-        "🔹 **محاسبه ریسک:** دکمه `🧮 محاسبه ریسک`\n"
-        "🔹 **خرید VIP:** دکمه `💎 خرید VIP`\n"
-        "🔹 **کد اشتراک:** دکمه `🎁 کد اشتراک`\n"
-        "🔹 **امتیاز:** دکمه `⭐ امتیاز من`\n\n"
-        "⚙️ **دستورات:**\n"
-        "`/start` — شروع\n"
-        "`/help` — راهنما\n"
-        "`/cancel` — لغو\n"
-        "`/admin` — پنل ادمین (فقط ادمین)",
-        parse_mode="Markdown"
+        "📚 <b>راهنمای بات AlphaEngine</b>\n\n"
+        "🔹 <b>تحلیل ارز:</b> نام نماد رو بفرست (مثل <code>BTC</code>)\n"
+        "🔹 <b>تحلیل صوتی:</b> یه ویس بفرست\n"
+        "🔹 <b>هشدار قیمت:</b> دکمه 🔔 هشدار قیمت\n"
+        "🔹 <b>محاسبه ریسک:</b> دکمه 🧮 محاسبه ریسک\n"
+        "🔹 <b>خرید VIP:</b> دکمه 💎 خرید VIP\n"
+        "🔹 <b>کد اشتراک:</b> دکمه 🎁 کد اشتراک\n"
+        "🔹 <b>امتیاز:</b> دکمه ⭐ امتیاز من\n\n"
+        "⚙️ <b>دستورات:</b>\n"
+        "<code>/start</code> — شروع\n"
+        "<code>/help</code> — راهنما\n"
+        "<code>/cancel</code> — لغو\n"
+        "<code>/admin</code> — پنل ادمین (فقط ادمین)",
+        parse_mode="HTML"
     )
 
 
@@ -1357,18 +1347,24 @@ async def start_cmd(message: types.Message):
     user = await db_get_or_create_user(user_id)
     status_text = "✨ VIP" if user["is_vip"] else "Standard 🔑"
 
-    await message.answer(
-        f"🏛 **AlphaEngine Terminal Pro**\n"
+    # استفاده از HTML — امن‌ترین حالت برای لینک و کاراکترهای خاص
+    start_text = (
+        f"🏛 <b>AlphaEngine Terminal Pro</b>\n"
         f"────────────────────────\n\n"
         f"به ترمینال تخصصی تحلیل الگوریتمی بازار کریپتو خوش آمدید.\n\n"
-        f"🔰 **وضعیت حساب:** `{status_text}`\n"
-        f"📡 **وضعیت اتصال:** آنلاین 🟢\n\n"
-        f"💡 **راهنمای سریع:**\n"
-        f"برای دریافت ستاپ معاملاتی و چارت تحلیلی، کافی است **نام نماد** "
-        f"(مانند `BTC` یا `SOL`) را ارسال کرده یا ویس بفرستید.\n\n"
-        f"📢 **کانال ما:** {CHANNEL_LINK}",
+        f"🔰 <b>وضعیت حساب:</b> <code>{status_text}</code>\n"
+        f"📡 <b>وضعیت اتصال:</b> آنلاین 🟢\n\n"
+        f"💡 <b>راهنمای سریع:</b>\n"
+        f"برای دریافت ستاپ معاملاتی و چارت تحلیلی، کافی است <b>نام نماد</b> "
+        f"(مانند <code>BTC</code> یا <code>SOL</code>) را ارسال کرده یا ویس بفرستید.\n\n"
+        f"📢 <b>کانال ما:</b> <a href=\"{CHANNEL_LINK}\">AlphaEngine Official</a>"
+    )
+
+    await message.answer(
+        start_text,
         reply_markup=get_user_kb(user_id),
-        parse_mode="Markdown"
+        parse_mode="HTML",
+        disable_web_page_preview=True
     )
 
 
@@ -1379,11 +1375,12 @@ async def start_cmd(message: types.Message):
 @dp.message(F.text == "📢 کانال ما")
 async def channel_link_handler(message: types.Message):
     await message.answer(
-        f"📢 **کانال رسمی AlphaEngine**\n\n"
+        f"📢 <b>کانال رسمی AlphaEngine</b>\n\n"
         f"برای دنبال کردن سیگنال‌ها، اخبار و تحلیل‌های روزانه:\n\n"
-        f"🔗 {CHANNEL_LINK}\n\n"
+        f"🔗 <a href=\"{CHANNEL_LINK}\">AlphaEngine Official</a>\n\n"
         f"💡 توی کانال، سیگنال‌های عمومی و اخبار مهم منتشر میشه.",
-        parse_mode="Markdown"
+        parse_mode="HTML",
+        disable_web_page_preview=True
     )
 
 
@@ -1399,14 +1396,14 @@ async def referral_info_handler(message: types.Message):
     ref_link = f"https://t.me/{bot_info.username}?start={user_id}"
 
     await message.answer(
-        f"🎁 **برنامه دعوت دوستان**\n\n"
-        f"لینک اختصاصی شما:\n`{ref_link}`\n\n"
+        f"🎁 <b>برنامه دعوت دوستان</b>\n\n"
+        f"لینک اختصاصی شما:\n<code>{ref_link}</code>\n\n"
         f"📊 وضعیت شما:\n"
-        f"• تعداد دعوت‌ها: **{len(user['referrals'])}**\n"
-        f"• هر دعوت: **+{POINTS_PER_REFERRAL} امتیاز** ⭐\n"
-        f"• امتیاز فعلی: **{user['points']}**\n\n"
-        f"💡 **{POINTS_FOR_VIP} امتیاز = {FREE_VIP_DAYS} روز VIP رایگان**",
-        parse_mode="Markdown"
+        f"• تعداد دعوت‌ها: <b>{len(user['referrals'])}</b>\n"
+        f"• هر دعوت: <b>+{POINTS_PER_REFERRAL} امتیاز</b> ⭐\n"
+        f"• امتیاز فعلی: <b>{user['points']}</b>\n\n"
+        f"💡 <b>{POINTS_FOR_VIP} امتیاز = {FREE_VIP_DAYS} روز VIP رایگان</b>",
+        parse_mode="HTML"
     )
 
 
@@ -1428,11 +1425,11 @@ async def crypto_news_handler(message: types.Message):
     )
     try:
         response_text = await query_gemini(prompt)
-        chunks = chunk_text(f"📰 **خلاصه اخبار:**\n\n{response_text}")
+        chunks = chunk_text(f"📰 <b>خلاصه اخبار:</b>\n\n{response_text}")
         try:
-            await msg.edit_text(chunks[0], parse_mode="Markdown")
+            await msg.edit_text(chunks[0], parse_mode="HTML")
             for c in chunks[1:]:
-                await message.answer(c, parse_mode="Markdown")
+                await message.answer(c, parse_mode="HTML")
         except Exception:
             await msg.edit_text(chunks[0])
             for c in chunks[1:]:
@@ -1448,7 +1445,7 @@ async def crypto_news_handler(message: types.Message):
 @dp.message(F.text == "🔔 هشدار قیمت")
 async def start_price_alert(message: types.Message):
     set_user_state(message.from_user.id, "awaiting_alert_symbol")
-    await message.answer("🔔 **تنظیم هشدار قیمت**\n\nلطفاً **نام ارز** را وارد کنید (مثال: BTC یا ETH):")
+    await message.answer("🔔 <b>تنظیم هشدار قیمت</b>\n\nلطفاً <b>نام ارز</b> را وارد کنید (مثال: BTC یا ETH):", parse_mode="HTML")
 
 
 @dp.callback_query(F.data == "new_alert")
@@ -1466,10 +1463,10 @@ async def callback_my_alerts(callback: types.CallbackQuery):
     if not user_alerts:
         await callback.message.answer("📋 هیچ هشدار فعالی ندارید.")
         return
-    text = "📋 **هشدارهای فعال شما:**\n\n"
+    text = "📋 <b>هشدارهای فعال شما:</b>\n\n"
     for i, a in enumerate(user_alerts, 1):
-        text += f"{i}. **{a['symbol']}** | هدف: `${a['target_price']}`\n"
-    await callback.message.answer(text, parse_mode="Markdown")
+        text += f"{i}. <b>{a['symbol']}</b> | هدف: <code>{a['target_price']}</code>\n"
+    await callback.message.answer(text, parse_mode="HTML")
 
 
 # ============================================================
@@ -1488,10 +1485,10 @@ async def pump_scanner_handler(message: types.Message):
     if not candidates:
         await msg.edit_text("⚠️ ارزی یافت نشد.")
         return
-    text = f"🔥 **ارزهای مستعد پامپ** (حجم ≥ ${MIN_PUMP_VOLUME_USD:,}):\n\n"
+    text = f"🔥 <b>ارزهای مستعد پامپ</b> (حجم ≥ ${MIN_PUMP_VOLUME_USD:,}):\n\n"
     for c in candidates:
-        text += f"📌 **{c['symbol'].replace('/', '')}** | رشد: `+{c['change']:.2f}%`\n"
-    await msg.edit_text(text, parse_mode="Markdown")
+        text += f"📌 <b>{c['symbol'].replace('/', '')}</b> | رشد: <code>+{c['change']:.2f}%</code>\n"
+    await msg.edit_text(text, parse_mode="HTML")
 
 
 @dp.message(F.text == "🐳 رادار توکن‌های جدید (DEX)")
@@ -1503,10 +1500,10 @@ async def dex_radar_handler(message: types.Message):
         return
     msg = await message.answer("🔎 در حال رصد...")
     tokens = await fetch_dex_tokens()
-    text = "🐳 **توکن‌های ترند DEX:**\n\n"
+    text = "🐳 <b>توکن‌های ترند DEX:</b>\n\n"
     for t in tokens:
-        text += f"🪙 **{t['symbol']}** | قیمت: `${t['price']}`\n"
-    await msg.edit_text(text, parse_mode="Markdown")
+        text += f"🪙 <b>{t['symbol']}</b> | قیمت: <code>{t['price']}</code>\n"
+    await msg.edit_text(text, parse_mode="HTML")
 
 
 # ============================================================
@@ -1521,9 +1518,10 @@ async def fear_and_greed(message: types.Message):
                 data = await resp.json()
                 item = data["data"][0]
                 await message.answer(
-                    f"📊 **شاخص ترس و طمع:**\n\n"
-                    f"🎯 عدد: **{item['value']}/100**\n"
-                    f"📌 وضعیت: **{item['value_classification']}**"
+                    f"📊 <b>شاخص ترس و طمع:</b>\n\n"
+                    f"🎯 عدد: <b>{item['value']}/100</b>\n"
+                    f"📌 وضعیت: <b>{item['value_classification']}</b>",
+                    parse_mode="HTML"
                 )
 
 
@@ -1538,7 +1536,7 @@ async def start_risk_calc(message: types.Message):
     if user_id not in user_cache:
         user_cache[user_id] = {}
     user_cache[user_id]["risk_calc_data"] = {}
-    await message.answer("🧮 **محاسبه مدیریت ریسک**\n\nموجودی کل حساب (دلار):")
+    await message.answer("🧮 <b>محاسبه مدیریت ریسک</b>\n\nموجودی کل حساب (دلار):", parse_mode="HTML")
 
 
 # ============================================================
@@ -1552,19 +1550,19 @@ async def user_profile(message: types.Message):
     status_text = "💎 VIP" if user["is_vip"] else "👤 رایگان"
     vip_until_text = ""
     if user["is_vip"] and user["vip_until"]:
-        vip_until_text = f"\n📅 VIP تا: `{user['vip_until'].strftime('%Y-%m-%d')}`"
+        vip_until_text = f"\n📅 VIP تا: <code>{user['vip_until'].strftime('%Y-%m-%d')}</code>"
 
     points_text = ""
     if not is_admin(user_id):
-        points_text = f"\n⭐ امتیاز: **{user['points']}**"
+        points_text = f"\n⭐ امتیاز: <b>{user['points']}</b>"
 
     await message.answer(
-        f"👤 **پروفایل کاربری:**\n\n"
-        f"🆔 آیدی: `{user_id}`\n"
+        f"👤 <b>پروفایل کاربری:</b>\n\n"
+        f"🆔 آیدی: <code>{user_id}</code>\n"
         f"👑 وضعیت: {status_text}{vip_until_text}"
         f"{points_text}\n"
-        f"👥 تعداد دعوت‌ها: **{len(user['referrals'])}**",
-        parse_mode="Markdown"
+        f"👥 تعداد دعوت‌ها: <b>{len(user['referrals'])}</b>",
+        parse_mode="HTML"
     )
 
 
@@ -1582,21 +1580,21 @@ async def my_points(message: types.Message):
     points = user["points"]
     needed = max(0, POINTS_FOR_VIP - points)
     text = (
-        f"⭐ **امتیاز شما: {points}**\n\n"
+        f"⭐ <b>امتیاز شما: {points}</b>\n\n"
         f"📊 راه‌های کسب امتیاز:\n"
-        f"• هر تحلیل ارز: **+{POINTS_PER_ANALYSIS}**\n"
-        f"• هر دعوت موفق: **+{POINTS_PER_REFERRAL}**\n\n"
-        f"🎁 **{POINTS_FOR_VIP} امتیاز = {FREE_VIP_DAYS} روز VIP رایگان**\n"
+        f"• هر تحلیل ارز: <b>+{POINTS_PER_ANALYSIS}</b>\n"
+        f"• هر دعوت موفق: <b>+{POINTS_PER_REFERRAL}</b>\n\n"
+        f"🎁 <b>{POINTS_FOR_VIP} امتیاز = {FREE_VIP_DAYS} روز VIP رایگان</b>\n"
     )
     if points >= POINTS_FOR_VIP:
-        text += f"\n✅ شما **{POINTS_FOR_VIP}** امتیاز دارید!\nبرای دریافت VIP، دکمه زیر رو بزن:"
+        text += f"\n✅ شما <b>{POINTS_FOR_VIP}</b> امتیاز دارید!\nبرای دریافت VIP، دکمه زیر رو بزن:"
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"🎁 دریافت {FREE_VIP_DAYS} روز VIP", callback_data="vip:redeem_points")]
         ])
-        await message.answer(text, reply_markup=kb, parse_mode="Markdown")
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
     else:
-        text += f"\n🔸 **{needed}** امتیاز دیگه نیاز داری."
-        await message.answer(text, parse_mode="Markdown")
+        text += f"\n🔸 <b>{needed}</b> امتیاز دیگه نیاز داری."
+        await message.answer(text, parse_mode="HTML")
 
 
 # ============================================================
@@ -1610,23 +1608,23 @@ async def buy_vip_handler(message: types.Message):
     if user["is_vip"]:
         until = user["vip_until"].strftime('%Y-%m-%d') if user["vip_until"] else "?"
         await message.answer(
-            f"💎 شما **VIP** هستید!\n📅 اعتبار تا: `{until}`",
-            parse_mode="Markdown"
+            f"💎 شما <b>VIP</b> هستید!\n📅 اعتبار تا: <code>{until}</code>",
+            parse_mode="HTML"
         )
         return
     await message.answer(
-        f"💎 **خرید VIP**\n"
+        f"💎 <b>خرید VIP</b>\n"
         f"────────────────\n\n"
-        f"💰 مبلغ: **{VIP_PRICE_TOMAN} تومان**\n"
-        f"📅 مدت: **{VIP_DURATION_DAYS} روز**\n\n"
-        f"💳 **شماره کارت:**\n`{PAYMENT_CARD}`\n"
-        f"👤 به نام: **{PAYMENT_HOLDER}**\n\n"
-        f"⚠️ **راهنمای پرداخت:**\n"
+        f"💰 مبلغ: <b>{VIP_PRICE_TOMAN} تومان</b>\n"
+        f"📅 مدت: <b>{VIP_DURATION_DAYS} روز</b>\n\n"
+        f"💳 <b>شماره کارت:</b>\n<code>{PAYMENT_CARD}</code>\n"
+        f"👤 به نام: <b>{PAYMENT_HOLDER}</b>\n\n"
+        f"⚠️ <b>راهنمای پرداخت:</b>\n"
         f"۱. مبلغ رو به کارت بالا واریز کنید\n"
         f"۲. عکس فیش واریزی رو همین‌جا بفرستید\n"
         f"۳. بعد از تأیید ادمین، VIP فعال میشه\n\n"
         f"⏳ زمان تأیید: حداکثر ۲ ساعت",
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 
@@ -1635,14 +1633,14 @@ async def vip_buy_callback(callback: types.CallbackQuery):
     await callback.answer()
     user_id = callback.from_user.id
     await callback.message.answer(
-        f"💎 **خرید VIP**\n"
+        f"💎 <b>خرید VIP</b>\n"
         f"────────────────\n\n"
-        f"💰 مبلغ: **{VIP_PRICE_TOMAN} تومان**\n"
-        f"📅 مدت: **{VIP_DURATION_DAYS} روز**\n\n"
-        f"💳 **شماره کارت:**\n`{PAYMENT_CARD}`\n"
-        f"👤 به نام: **{PAYMENT_HOLDER}**\n\n"
+        f"💰 مبلغ: <b>{VIP_PRICE_TOMAN} تومان</b>\n"
+        f"📅 مدت: <b>{VIP_DURATION_DAYS} روز</b>\n\n"
+        f"💳 <b>شماره کارت:</b>\n<code>{PAYMENT_CARD}</code>\n"
+        f"👤 به نام: <b>{PAYMENT_HOLDER}</b>\n\n"
         f"⚠️ عکس فیش واریزی رو همین‌جا بفرستید.",
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
     set_user_state(user_id, "awaiting_payment_receipt")
 
@@ -1655,22 +1653,22 @@ async def vip_points_callback(callback: types.CallbackQuery):
     if points < POINTS_FOR_VIP:
         await callback.message.answer(
             f"❌ امتیاز کافی نداری.\n\n"
-            f"⭐ امتیاز فعلی: **{points}**\n"
-            f"🎯 نیاز: **{POINTS_FOR_VIP}**",
-            parse_mode="Markdown"
+            f"⭐ امتیاز فعلی: <b>{points}</b>\n"
+            f"🎯 نیاز: <b>{POINTS_FOR_VIP}</b>",
+            parse_mode="HTML"
         )
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"✅ تأیید ({POINTS_FOR_VIP} امتیاز)", callback_data="vip:redeem_points")]
     ])
     await callback.message.answer(
-        f"🎁 **دریافت VIP با امتیاز**\n\n"
-        f"⭐ امتیاز فعلی: **{points}**\n"
-        f"💎 دریافت: **{FREE_VIP_DAYS} روز VIP**\n"
-        f"💸 هزینه: **{POINTS_FOR_VIP} امتیاز**\n\n"
+        f"🎁 <b>دریافت VIP با امتیاز</b>\n\n"
+        f"⭐ امتیاز فعلی: <b>{points}</b>\n"
+        f"💎 دریافت: <b>{FREE_VIP_DAYS} روز VIP</b>\n"
+        f"💸 هزینه: <b>{POINTS_FOR_VIP} امتیاز</b>\n\n"
         f"تأیید می‌کنی؟",
         reply_markup=kb,
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 
@@ -1687,11 +1685,11 @@ async def vip_redeem_points(callback: types.CallbackQuery):
         return
     until = await db_extend_vip(user_id, FREE_VIP_DAYS)
     await callback.message.answer(
-        f"🎉 **تبریک!** VIP فعال شد!\n\n"
-        f"📅 مدت: **{FREE_VIP_DAYS} روز**\n"
-        f"🗓 اعتبار تا: `{until.strftime('%Y-%m-%d')}`\n"
-        f"💸 امتیاز کسر شده: **{POINTS_FOR_VIP}**",
-        parse_mode="Markdown"
+        f"🎉 <b>تبریک! VIP فعال شد!</b>\n\n"
+        f"📅 مدت: <b>{FREE_VIP_DAYS} روز</b>\n"
+        f"🗓 اعتبار تا: <code>{until.strftime('%Y-%m-%d')}</code>\n"
+        f"💸 امتیاز کسر شده: <b>{POINTS_FOR_VIP}</b>",
+        parse_mode="HTML"
     )
 
 
@@ -1704,9 +1702,10 @@ async def discount_code_handler(message: types.Message):
     user_id = message.from_user.id
     set_user_state(user_id, "awaiting_discount_code")
     await message.answer(
-        "🎁 **کد اشتراک**\n\n"
-        f"با وارد کردن کد صحیح، **{FREE_VIP_DAYS} روز VIP رایگان** دریافت می‌کنید.\n\n"
-        "کد خود را ارسال کنید:"
+        "🎁 <b>کد اشتراک</b>\n\n"
+        f"با وارد کردن کد صحیح، <b>{FREE_VIP_DAYS} روز VIP رایگان</b> دریافت می‌کنید.\n\n"
+        "کد خود را ارسال کنید:",
+        parse_mode="HTML"
     )
 
 
@@ -1725,8 +1724,8 @@ async def handle_payment_photo(message: types.Message):
     state = user_cache.get(user_id, {}).get("state")
     if state != "awaiting_payment_receipt":
         await message.answer(
-            "⚠️ برای ارسال فیش، اول دکمه **💎 خرید VIP** رو بزن.",
-            parse_mode="Markdown"
+            "⚠️ برای ارسال فیش، اول دکمه <b>💎 خرید VIP</b> رو بزن.",
+            parse_mode="HTML"
         )
         return
 
@@ -1738,15 +1737,15 @@ async def handle_payment_photo(message: types.Message):
     full_name = message.from_user.full_name or "—"
 
     admin_text = (
-        f"🔔 **درخواست VIP جدید**\n"
+        f"🔔 <b>درخواست VIP جدید</b>\n"
         f"────────────────\n"
-        f"🆔 آیدی: `{user_id}`\n"
+        f"🆔 آیدی: <code>{user_id}</code>\n"
         f"👤 نام: {full_name}\n"
         f"📛 یوزرنیم: @{username}\n"
-        f"💰 مبلغ ادعایی: **{VIP_PRICE_TOMAN} تومان**\n"
-        f"📅 مدت: **{VIP_DURATION_DAYS} روز**\n"
-        f"🕐 زمان: `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}`\n\n"
-        f"🔖 شماره درخواست: `#{req_id}`"
+        f"💰 مبلغ: <b>{VIP_PRICE_TOMAN} تومان</b>\n"
+        f"📅 مدت: <b>{VIP_DURATION_DAYS} روز</b>\n"
+        f"🕐 زمان: <code>{datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}</code>\n\n"
+        f"🔖 شماره: <code>#{req_id}</code>"
     )
 
     try:
@@ -1755,17 +1754,17 @@ async def handle_payment_photo(message: types.Message):
             photo=file_id,
             caption=admin_text,
             reply_markup=payment_approval_keyboard(req_id),
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
     except Exception as e:
         logging.error(f"Send to admin failed: {e}")
 
     await message.answer(
-        f"✅ **فیش شما دریافت شد!**\n\n"
-        f"🔖 شماره درخواست: `#{req_id}`\n"
+        f"✅ <b>فیش شما دریافت شد!</b>\n\n"
+        f"🔖 شماره: <code>#{req_id}</code>\n"
         f"⏳ بعد از تأیید ادمین، VIP فعال میشه.\n"
         f"📞 معمولاً کمتر از ۲ ساعت طول می‌کشه.",
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 
@@ -1799,18 +1798,17 @@ async def payment_callbacks(callback: types.CallbackQuery):
         try:
             await bot.send_message(
                 target_uid,
-                f"🎉 **تبریک! VIP فعال شد!**\n\n"
-                f"📅 مدت: **{VIP_DURATION_DAYS} روز**\n"
-                f"🗓 اعتبار تا: `{until.strftime('%Y-%m-%d')}`\n"
-                f"🔖 درخواست: `#{req_id}`",
-                parse_mode="Markdown"
+                f"🎉 <b>تبریک! VIP فعال شد!</b>\n\n"
+                f"📅 مدت: <b>{VIP_DURATION_DAYS} روز</b>\n"
+                f"🗓 اعتبار تا: <code>{until.strftime('%Y-%m-%d')}</code>\n"
+                f"🔖 درخواست: <code>#{req_id}</code>",
+                parse_mode="HTML"
             )
         except Exception:
             pass
         try:
-            await callback.message.edit_caption(
-                caption=(callback.message.caption or "") + "\n\n✅ **تأیید شد**",
-            )
+            new_cap = (callback.message.caption or "") + "\n\n✅ تأیید شد"
+            await callback.message.edit_caption(caption=new_cap)
         except Exception:
             pass
 
@@ -1820,17 +1818,16 @@ async def payment_callbacks(callback: types.CallbackQuery):
         try:
             await bot.send_message(
                 target_uid,
-                f"❌ **درخواست VIP شما رد شد.**\n\n"
-                f"🔖 درخواست: `#{req_id}`\n"
+                f"❌ <b>درخواست VIP شما رد شد.</b>\n\n"
+                f"🔖 درخواست: <code>#{req_id}</code>\n"
                 f"💡 در صورت اشتباه، با پشتیبانی تماس بگیرید.",
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
         except Exception:
             pass
         try:
-            await callback.message.edit_caption(
-                caption=(callback.message.caption or "") + "\n\n❌ **رد شد**",
-            )
+            new_cap = (callback.message.caption or "") + "\n\n❌ رد شد"
+            await callback.message.edit_caption(caption=new_cap)
         except Exception:
             pass
 
@@ -1849,9 +1846,9 @@ async def admin_command(message: types.Message):
         return
     await db_log_admin(user_id, "Opened admin panel via /admin")
     await message.answer(
-        "⚙️ **پنل ادمین AlphaEngine**\n\nاز منوی زیر انتخاب کنید:",
+        "⚙️ <b>پنل ادمین AlphaEngine</b>\n\nاز منوی زیر انتخاب کنید:",
         reply_markup=admin_panel_keyboard(),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 
@@ -1863,9 +1860,9 @@ async def admin_panel_button(message: types.Message):
         return
     await db_log_admin(user_id, "Opened admin panel via button")
     await message.answer(
-        "⚙️ **پنل ادمین AlphaEngine**\n\nاز منوی زیر انتخاب کنید:",
+        "⚙️ <b>پنل ادمین AlphaEngine</b>\n\nاز منوی زیر انتخاب کنید:",
         reply_markup=admin_panel_keyboard(),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 
@@ -1883,15 +1880,15 @@ async def admin_callbacks(callback: types.CallbackQuery):
     if action == "back":
         try:
             await callback.message.edit_text(
-                "⚙️ **پنل ادمین AlphaEngine**\n\nاز منوی زیر انتخاب کنید:",
+                "⚙️ <b>پنل ادمین AlphaEngine</b>\n\nاز منوی زیر انتخاب کنید:",
                 reply_markup=admin_panel_keyboard(),
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
         except Exception:
             await callback.message.answer(
-                "⚙️ **پنل ادمین AlphaEngine**",
+                "⚙️ <b>پنل ادمین AlphaEngine</b>",
                 reply_markup=admin_panel_keyboard(),
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
         return
 
@@ -1904,31 +1901,31 @@ async def admin_callbacks(callback: types.CallbackQuery):
         digest = "🟢" if settings.get("daily_digest_enabled") else "🔴"
         channel = "🟢" if settings.get("channel_broadcast_enabled", True) else "🔴"
         text = (
-            f"📊 **آمار کلی بات**\n\n"
-            f"👥 کل کاربران: **{c['total']}**\n"
-            f"💎 کاربران VIP: **{c['vip']}**\n"
-            f"🆓 کاربران رایگان: **{c['total'] - c['vip']}**\n"
-            f"🚫 بن‌شده: **{c['banned']}**\n"
-            f"🔔 هشدارهای فعال: **{len(alerts)}**\n"
-            f"💳 درخواست VIP در انتظار: **{len(payments)}**\n"
-            f"📅 فعال امروز: **{c['today']}**\n\n"
-            f"⚙️ **وضعیت سیستم:**\n"
+            f"📊 <b>آمار کلی بات</b>\n\n"
+            f"👥 کل کاربران: <b>{c['total']}</b>\n"
+            f"💎 کاربران VIP: <b>{c['vip']}</b>\n"
+            f"🆓 کاربران رایگان: <b>{c['total'] - c['vip']}</b>\n"
+            f"🚫 بن‌شده: <b>{c['banned']}</b>\n"
+            f"🔔 هشدارهای فعال: <b>{len(alerts)}</b>\n"
+            f"💳 درخواست VIP در انتظار: <b>{len(payments)}</b>\n"
+            f"📅 فعال امروز: <b>{c['today']}</b>\n\n"
+            f"⚙️ <b>وضعیت سیستم:</b>\n"
             f"🚀 رادار پامپ/دامپ: {pump}\n"
             f"☀️ بولتن روزانه: {digest}\n"
             f"📢 ارسال به کانال: {channel}"
         )
         await db_log_admin(user_id, "Viewed stats")
         try:
-            await callback.message.edit_text(text, reply_markup=admin_back_keyboard(), parse_mode="Markdown")
+            await callback.message.edit_text(text, reply_markup=admin_back_keyboard(), parse_mode="HTML")
         except Exception:
-            await callback.message.answer(text, reply_markup=admin_back_keyboard(), parse_mode="Markdown")
+            await callback.message.answer(text, reply_markup=admin_back_keyboard(), parse_mode="HTML")
         return
 
     if action == "users_menu":
         await callback.message.edit_text(
-            "👥 **مدیریت کاربران**\n\nیکی رو انتخاب کن:",
+            "👥 <b>مدیریت کاربران</b>\n\nیکی رو انتخاب کن:",
             reply_markup=admin_users_menu_keyboard(),
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
         return
 
@@ -1938,17 +1935,17 @@ async def admin_callbacks(callback: types.CallbackQuery):
             text = "📋 کاربری ثبت نشده."
         else:
             banned_list = await db_get_banned_users()
-            text = "📋 **آخرین ۲۰ کاربر فعال:**\n\n"
+            text = "📋 <b>آخرین ۲۰ کاربر فعال:</b>\n\n"
             for u in users:
                 vip_tag = "💎" if u["is_vip"] else "🆓"
                 ban_tag = "🚫" if u["user_id"] in banned_list else ""
-                text += f"{vip_tag}{ban_tag} `{u['user_id']}` ⭐{u.get('points', 0) or 0}\n"
-            text += f"\n👥 کل: **{len(users)}**"
+                text += f"{vip_tag}{ban_tag} <code>{u['user_id']}</code> ⭐{u.get('points', 0) or 0}\n"
+            text += f"\n👥 کل: <b>{len(users)}</b>"
         await db_log_admin(user_id, "Viewed users list")
         try:
-            await callback.message.edit_text(text, reply_markup=admin_back_keyboard(), parse_mode="Markdown")
+            await callback.message.edit_text(text, reply_markup=admin_back_keyboard(), parse_mode="HTML")
         except Exception:
-            await callback.message.answer(text, reply_markup=admin_back_keyboard(), parse_mode="Markdown")
+            await callback.message.answer(text, reply_markup=admin_back_keyboard(), parse_mode="HTML")
         return
 
     if action == "vip_list":
@@ -1956,14 +1953,14 @@ async def admin_callbacks(callback: types.CallbackQuery):
         if not users:
             text = "💎 VIP‌ای وجود ندارد."
         else:
-            text = f"💎 **کاربران VIP ({len(users)}):**\n\n"
+            text = f"💎 <b>کاربران VIP ({len(users)}):</b>\n\n"
             for u in users:
                 until = u["vip_until"].strftime('%Y-%m-%d') if u.get("vip_until") else "?"
-                text += f"💎 `{u['user_id']}` تا `{until}`\n"
+                text += f"💎 <code>{u['user_id']}</code> تا <code>{until}</code>\n"
         try:
-            await callback.message.edit_text(text, reply_markup=admin_back_keyboard(), parse_mode="Markdown")
+            await callback.message.edit_text(text, reply_markup=admin_back_keyboard(), parse_mode="HTML")
         except Exception:
-            await callback.message.answer(text, reply_markup=admin_back_keyboard(), parse_mode="Markdown")
+            await callback.message.answer(text, reply_markup=admin_back_keyboard(), parse_mode="HTML")
         return
 
     if action == "ban_list":
@@ -1971,18 +1968,18 @@ async def admin_callbacks(callback: types.CallbackQuery):
         if not banned:
             text = "🚫 لیست بن خالیه."
         else:
-            text = f"🚫 **بن‌شده‌ها ({len(banned)}):**\n\n"
+            text = f"🚫 <b>بن‌شده‌ها ({len(banned)}):</b>\n\n"
             for uid in banned[:30]:
-                text += f"🚫 `{uid}`\n"
+                text += f"🚫 <code>{uid}</code>\n"
         try:
-            await callback.message.edit_text(text, reply_markup=admin_back_keyboard(), parse_mode="Markdown")
+            await callback.message.edit_text(text, reply_markup=admin_back_keyboard(), parse_mode="HTML")
         except Exception:
-            await callback.message.answer(text, reply_markup=admin_back_keyboard(), parse_mode="Markdown")
+            await callback.message.answer(text, reply_markup=admin_back_keyboard(), parse_mode="HTML")
         return
 
     if action == "user_search":
         admin_state[user_id] = {"action": "awaiting_user_search"}
-        await callback.message.answer("🔍 **جستجو**\n\nآیدی عددی کاربر:")
+        await callback.message.answer("🔍 <b>جستجو</b>\n\nآیدی عددی کاربر:", parse_mode="HTML")
         return
 
     if action in ("setvip", "unvip", "ban", "unban") and len(data) >= 3:
@@ -2009,32 +2006,32 @@ async def admin_callbacks(callback: types.CallbackQuery):
         pendings = await db_get_pending_payments()
         if not pendings:
             await callback.message.edit_text(
-                "💳 **درخواست‌های VIP**\n\n✅ هیچ درخواست در انتظاری نیست.",
+                "💳 <b>درخواست‌های VIP</b>\n\n✅ هیچ درخواست در انتظاری نیست.",
                 reply_markup=admin_back_keyboard(),
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
             return
-        text = f"💳 **درخواست‌های VIP در انتظار ({len(pendings)}):**\n\n"
+        text = f"💳 <b>درخواست‌های VIP در انتظار ({len(pendings)}):</b>\n\n"
         text += "هر درخواست جداگانه با دکمه‌های تأیید/رد ارسال شده."
         await db_log_admin(user_id, "Viewed pending payments")
         try:
-            await callback.message.edit_text(text, reply_markup=admin_back_keyboard(), parse_mode="Markdown")
+            await callback.message.edit_text(text, reply_markup=admin_back_keyboard(), parse_mode="HTML")
         except Exception:
-            await callback.message.answer(text, reply_markup=admin_back_keyboard(), parse_mode="Markdown")
+            await callback.message.answer(text, reply_markup=admin_back_keyboard(), parse_mode="HTML")
         for p in pendings[:5]:
             try:
                 cap = (
-                    f"💳 **درخواست #{p['id']}**\n\n"
-                    f"🆔 کاربر: `{p['user_id']}`\n"
-                    f"💰 مبلغ: `{p['amount']:,}` تومان\n"
-                    f"🕐 زمان: `{p['created_at'].strftime('%Y-%m-%d %H:%M')}`"
+                    f"💳 <b>درخواست #{p['id']}</b>\n\n"
+                    f"🆔 کاربر: <code>{p['user_id']}</code>\n"
+                    f"💰 مبلغ: <code>{p['amount']:,}</code> تومان\n"
+                    f"🕐 زمان: <code>{p['created_at'].strftime('%Y-%m-%d %H:%M')}</code>"
                 )
                 await bot.send_photo(
                     chat_id=user_id,
                     photo=p["receipt_file_id"],
                     caption=cap,
                     reply_markup=payment_approval_keyboard(p["id"]),
-                    parse_mode="Markdown"
+                    parse_mode="HTML"
                 )
             except Exception:
                 pass
@@ -2042,9 +2039,9 @@ async def admin_callbacks(callback: types.CallbackQuery):
 
     if action == "codes_menu":
         await callback.message.edit_text(
-            "🎁 **کدهای اشتراک**\n\nهر کد فقط یک بار استفاده میشه.",
+            "🎁 <b>کدهای اشتراک</b>\n\nهر کد فقط یک بار استفاده میشه.",
             reply_markup=admin_codes_menu_keyboard(),
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
         return
 
@@ -2052,13 +2049,13 @@ async def admin_callbacks(callback: types.CallbackQuery):
         code = await db_create_discount_code(user_id, days_valid=7)
         await db_log_admin(user_id, f"Created discount code {code}")
         await callback.message.edit_text(
-            f"✅ **کد جدید ساخته شد:**\n\n"
-            f"🎁 `{code}`\n\n"
-            f"📅 اعتبار کد: **۷ روز**\n"
-            f"💎 پاداش: **{FREE_VIP_DAYS} روز VIP رایگان**\n"
+            f"✅ <b>کد جدید ساخته شد:</b>\n\n"
+            f"🎁 <code>{code}</code>\n\n"
+            f"📅 اعتبار کد: <b>۷ روز</b>\n"
+            f"💎 پاداش: <b>{FREE_VIP_DAYS} روز VIP رایگان</b>\n"
             f"🔖 یک بار قابل استفاده",
             reply_markup=admin_codes_menu_keyboard(),
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
         return
 
@@ -2067,36 +2064,36 @@ async def admin_callbacks(callback: types.CallbackQuery):
         if not codes:
             text = "🎁 هیچ کدی ساخته نشده."
         else:
-            text = "🎁 **آخرین ۲۰ کد:**\n\n"
+            text = "🎁 <b>آخرین ۲۰ کد:</b>\n\n"
             for c in codes:
                 used = "✅" if c["is_used"] else "🟢"
-                text += f"{used} `{c['code']}`\n"
+                text += f"{used} <code>{c['code']}</code>\n"
         try:
-            await callback.message.edit_text(text, reply_markup=admin_codes_menu_keyboard(), parse_mode="Markdown")
+            await callback.message.edit_text(text, reply_markup=admin_codes_menu_keyboard(), parse_mode="HTML")
         except Exception:
-            await callback.message.answer(text, reply_markup=admin_codes_menu_keyboard(), parse_mode="Markdown")
+            await callback.message.answer(text, reply_markup=admin_codes_menu_keyboard(), parse_mode="HTML")
         return
 
     if action == "broadcast_menu":
         await callback.message.edit_text(
-            "📢 **پیام همگانی**\n\nمخاطب:",
+            "📢 <b>پیام همگانی</b>\n\nمخاطب:",
             reply_markup=admin_broadcast_keyboard(),
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
         return
 
     if action in ("bcast_all", "bcast_vip", "bcast_free"):
         target = {"bcast_all": "همه", "bcast_vip": "فقط VIP", "bcast_free": "فقط غیر VIP"}[action]
         admin_state[user_id] = {"action": "awaiting_broadcast", "target": action}
-        await callback.message.answer(f"📢 مخاطب: **{target}**\n\nمتن پیام:")
+        await callback.message.answer(f"📢 مخاطب: <b>{target}</b>\n\nمتن پیام:", parse_mode="HTML")
         return
 
     if action == "alerts_menu":
         alerts = await db_get_all_alerts()
         await callback.message.edit_text(
-            f"🔔 **هشدارها**\n\nتعداد: **{len(alerts)}**",
+            f"🔔 <b>هشدارها</b>\n\nتعداد: <b>{len(alerts)}</b>",
             reply_markup=admin_alerts_keyboard(),
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
         return
 
@@ -2105,13 +2102,13 @@ async def admin_callbacks(callback: types.CallbackQuery):
         if not alerts:
             text = "📋 هشداری نیست."
         else:
-            text = f"📋 **هشدارها ({len(alerts)}):**\n\n"
+            text = f"📋 <b>هشدارها ({len(alerts)}):</b>\n\n"
             for a in alerts[:30]:
-                text += f"🪙 `{a['symbol']}` | `${a['target_price']}` | `{a['user_id']}`\n"
+                text += f"🪙 <code>{a['symbol']}</code> | <code>{a['target_price']}</code> | <code>{a['user_id']}</code>\n"
         try:
-            await callback.message.edit_text(text, reply_markup=admin_back_keyboard(), parse_mode="Markdown")
+            await callback.message.edit_text(text, reply_markup=admin_back_keyboard(), parse_mode="HTML")
         except Exception:
-            await callback.message.answer(text, reply_markup=admin_back_keyboard(), parse_mode="Markdown")
+            await callback.message.answer(text, reply_markup=admin_back_keyboard(), parse_mode="HTML")
         return
 
     if action == "alerts_clear":
@@ -2119,15 +2116,15 @@ async def admin_callbacks(callback: types.CallbackQuery):
         await db_log_admin(user_id, f"Cleared {count} alerts")
         try:
             await callback.message.edit_text(
-                f"✅ **{count} هشدار پاک شد.**",
+                f"✅ <b>{count} هشدار پاک شد.</b>",
                 reply_markup=admin_back_keyboard(),
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
         except Exception:
             await callback.message.answer(
-                f"✅ **{count} هشدار پاک شد.**",
+                f"✅ <b>{count} هشدار پاک شد.</b>",
                 reply_markup=admin_back_keyboard(),
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
         return
 
@@ -2136,21 +2133,21 @@ async def admin_callbacks(callback: types.CallbackQuery):
         if not logs:
             text = "📋 لاگی نیست."
         else:
-            text = "📋 **آخرین ۲۰ لاگ:**\n\n"
+            text = "📋 <b>آخرین ۲۰ لاگ:</b>\n\n"
             for l in logs:
                 ts = l["created_at"].strftime("%m-%d %H:%M") if l["created_at"] else "?"
-                text += f"`[{ts}]` {l['action'][:80]}\n"
+                text += f"<code>[{ts}]</code> {l['action'][:80]}\n"
         try:
-            await callback.message.edit_text(text, reply_markup=admin_back_keyboard(), parse_mode="Markdown")
+            await callback.message.edit_text(text, reply_markup=admin_back_keyboard(), parse_mode="HTML")
         except Exception:
-            await callback.message.answer(text, reply_markup=admin_back_keyboard(), parse_mode="Markdown")
+            await callback.message.answer(text, reply_markup=admin_back_keyboard(), parse_mode="HTML")
         return
 
     if action == "settings":
         await callback.message.edit_text(
-            "⚙️ **وضعیت سیستم**\n\nروشن/خاموش:",
+            "⚙️ <b>وضعیت سیستم</b>\n\nروشن/خاموش:",
             reply_markup=admin_settings_keyboard(),
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
         return
 
@@ -2162,9 +2159,9 @@ async def admin_callbacks(callback: types.CallbackQuery):
         txt = "روشن" if new_val else "خاموش"
         await db_log_admin(user_id, f"Toggled pump to {txt}")
         await callback.message.edit_text(
-            f"✅ رادار پامپ/دامپ: **{txt}**",
+            f"✅ رادار پامپ/دامپ: <b>{txt}</b>",
             reply_markup=admin_settings_keyboard(),
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
         return
 
@@ -2176,9 +2173,9 @@ async def admin_callbacks(callback: types.CallbackQuery):
         txt = "روشن" if new_val else "خاموش"
         await db_log_admin(user_id, f"Toggled digest to {txt}")
         await callback.message.edit_text(
-            f"✅ بولتن روزانه: **{txt}**",
+            f"✅ بولتن روزانه: <b>{txt}</b>",
             reply_markup=admin_settings_keyboard(),
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
         return
 
@@ -2190,9 +2187,9 @@ async def admin_callbacks(callback: types.CallbackQuery):
         txt = "روشن" if new_val else "خاموش"
         await db_log_admin(user_id, f"Toggled channel to {txt}")
         await callback.message.edit_text(
-            f"✅ ارسال به کانال: **{txt}**",
+            f"✅ ارسال به کانال: <b>{txt}</b>",
             reply_markup=admin_settings_keyboard(),
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
         return
 
@@ -2214,7 +2211,7 @@ async def handle_timeframe_click(callback: types.CallbackQuery):
         return
 
     _, symbol, tf = callback.data.split(":")
-    loading_msg = await callback.message.answer(f"🔄 در حال پردازش **{escape_md(symbol)}**...")
+    loading_msg = await callback.message.answer(f"🔄 در حال پردازش <b>{symbol}</b>...", parse_mode="HTML")
 
     try:
         signal_text, chart_bytes = await generate_signal(symbol, tf)
@@ -2228,8 +2225,8 @@ async def handle_timeframe_click(callback: types.CallbackQuery):
             try:
                 await callback.message.answer_photo(
                     photo=photo_file,
-                    caption=f"📊 **چارت {escape_md(symbol)} ({tf})**",
-                    parse_mode="Markdown"
+                    caption=f"📊 <b>چارت {symbol} ({tf})</b>",
+                    parse_mode="HTML"
                 )
             except Exception:
                 await callback.message.answer_photo(photo=photo_file, caption=f"📊 چارت {symbol} ({tf})")
@@ -2237,7 +2234,7 @@ async def handle_timeframe_click(callback: types.CallbackQuery):
         if signal_text:
             for c in chunk_text(signal_text):
                 try:
-                    await callback.message.answer(c, parse_mode="Markdown")
+                    await callback.message.answer(c, parse_mode="HTML")
                 except Exception:
                     await callback.message.answer(c)
 
@@ -2249,7 +2246,7 @@ async def handle_timeframe_click(callback: types.CallbackQuery):
 
     except Exception as e:
         logging.error(f"TF Error: {type(e).__name__}: {e}")
-        await callback.message.answer(f"⚠️ خطا:\n{escape_md(str(e))}")
+        await callback.message.answer(f"⚠️ خطا:\n<code>{str(e)[:200]}</code>", parse_mode="HTML")
 
 
 # ============================================================
@@ -2284,15 +2281,15 @@ async def handle_text_input(message: types.Message):
             ban_tag = "🚫 بن" if banned else "✅ فعال"
             until = user["vip_until"].strftime('%Y-%m-%d') if user.get("vip_until") else "—"
             await message.answer(
-                f"👤 **اطلاعات کاربر**\n\n"
-                f"🆔 آیدی: `{target_uid}`\n"
+                f"👤 <b>اطلاعات کاربر</b>\n\n"
+                f"🆔 آیدی: <code>{target_uid}</code>\n"
                 f"👑 وضعیت: {vip_tag}\n"
-                f"📅 VIP تا: `{until}`\n"
+                f"📅 VIP تا: <code>{until}</code>\n"
                 f"🚫 بن: {ban_tag}\n"
-                f"⭐ امتیاز: **{user['points']}**\n"
-                f"👥 دعوت: **{len(user['referrals'])}**",
+                f"⭐ امتیاز: <b>{user['points']}</b>\n"
+                f"👥 دعوت: <b>{len(user['referrals'])}</b>",
                 reply_markup=vip_action_keyboard(target_uid, user["is_vip"], banned),
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
             return
 
@@ -2307,13 +2304,13 @@ async def handle_text_input(message: types.Message):
                 if target == "bcast_free" and u["is_vip"]:
                     continue
                 try:
-                    await bot.send_message(u["user_id"], f"📢 **پیام از ادمین:**\n\n{text}", parse_mode="Markdown")
+                    await bot.send_message(u["user_id"], f"📢 <b>پیام از ادمین:</b>\n\n{text}", parse_mode="HTML")
                     count += 1
                     await asyncio.sleep(0.05)
                 except Exception:
                     pass
             await db_log_admin(user_id, f"Broadcast to {target} ({count} users)")
-            await message.answer(f"✅ پیام به **{count}** کاربر ارسال شد.", parse_mode="Markdown")
+            await message.answer(f"✅ پیام به <b>{count}</b> کاربر ارسال شد.", parse_mode="HTML")
             return
 
     check_state_timeout(user_id)
@@ -2326,7 +2323,7 @@ async def handle_text_input(message: types.Message):
             formatted += "/USDT"
         st_data["alert_temp"] = {"symbol": formatted}
         set_user_state(user_id, "awaiting_alert_price")
-        await message.answer(f"قیمت مد نظر برای **{escape_md(formatted)}** (دلار):")
+        await message.answer(f"قیمت مد نظر برای <b>{formatted}</b> (دلار):", parse_mode="HTML")
         return
 
     elif state == "awaiting_alert_price":
@@ -2341,9 +2338,9 @@ async def handle_text_input(message: types.Message):
             await db_add_alert(user_id, symbol, target_p, condition)
             set_user_state(user_id, None)
             await message.answer(
-                f"✅ **هشدار ثبت شد!**\n{symbol} | هدف: `${target_p}`",
+                f"✅ <b>هشدار ثبت شد!</b>\n{symbol} | هدف: <code>{target_p}</code>",
                 reply_markup=alert_success_keyboard(),
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
         except Exception:
             await message.answer("⚠️ قیمت نامعتبر است.")
@@ -2386,11 +2383,11 @@ async def handle_text_input(message: types.Message):
             sl_distance_pct = abs(entry - sl) / entry
             position_size = risk_amount / sl_distance_pct
             await message.answer(
-                f"🧮 **نتیجه مدیریت ریسک:**\n\n"
-                f"💵 کل سرمایه: `${capital:,.2f}`\n"
-                f"🎯 ریسک: `${risk_amount:,.2f}` ({risk_pct}%)\n"
-                f"✅ **حجم پیشنهادی:** `${position_size:,.2f}`",
-                parse_mode="Markdown"
+                f"🧮 <b>نتیجه مدیریت ریسک:</b>\n\n"
+                f"💵 کل سرمایه: <code>{capital:,.2f}</code>\n"
+                f"🎯 ریسک: <code>{risk_amount:,.2f}</code> ({risk_pct}%)\n"
+                f"✅ <b>حجم پیشنهادی:</b> <code>{position_size:,.2f}</code>",
+                parse_mode="HTML"
             )
         except Exception:
             await message.answer("لطفاً عدد وارد کن.")
@@ -2403,10 +2400,10 @@ async def handle_text_input(message: types.Message):
         if result["ok"]:
             until = await db_extend_vip(user_id, result["days"])
             await message.answer(
-                f"🎉 **کد تأیید شد!**\n\n"
-                f"💎 VIP فعال شد: **{result['days']} روز**\n"
-                f"🗓 اعتبار تا: `{until.strftime('%Y-%m-%d')}`",
-                parse_mode="Markdown"
+                f"🎉 <b>کد تأیید شد!</b>\n\n"
+                f"💎 VIP فعال شد: <b>{result['days']} روز</b>\n"
+                f"🗓 اعتبار تا: <code>{until.strftime('%Y-%m-%d')}</code>",
+                parse_mode="HTML"
             )
         else:
             await message.answer(f"❌ {result['msg']}")
@@ -2424,8 +2421,9 @@ async def handle_text_input(message: types.Message):
         return
 
     await message.answer(
-        f"⏱ تایم‌فریم **{escape_md(symbol_text)}**:",
-        reply_markup=timeframe_keyboard(symbol_text)
+        f"⏱ تایم‌فریم <b>{symbol_text}</b>:",
+        reply_markup=timeframe_keyboard(symbol_text),
+        parse_mode="HTML"
     )
 
 
@@ -2468,18 +2466,18 @@ async def pump_dump_detector_loop():
                             last_alerts[symbol] = now_ts
                             clean = symbol.replace('/', '')
                             alert_msg = (
-                                f"🚨 **هشدار رادار بازار!**\n\n"
-                                f"🪙 **{clean}**\n"
+                                f"🚨 <b>هشدار رادار بازار!</b>\n\n"
+                                f"🪙 <b>{clean}</b>\n"
                                 f"📊 {alert_type}\n"
-                                f"📈 `{pct:+.2f}%`\n"
-                                f"⚡️ `{cur_vol/avg_vol:.1f}X`\n"
-                                f"💵 `${last['Close']}`"
+                                f"📈 <code>{pct:+.2f}%</code>\n"
+                                f"⚡️ <code>{cur_vol/avg_vol:.1f}X</code>\n"
+                                f"💵 <code>{last['Close']}</code>"
                             )
                             users = await db_get_all_users(limit=10000)
                             for u in users:
                                 if u["is_vip"]:
                                     try:
-                                        await bot.send_message(u["user_id"], alert_msg, parse_mode="Markdown")
+                                        await bot.send_message(u["user_id"], alert_msg, parse_mode="HTML")
                                         await asyncio.sleep(0.05)
                                     except Exception:
                                         pass
@@ -2523,11 +2521,11 @@ async def generate_daily_digest():
     except Exception:
         news_summary = "تغییرات نوسانی در بازار."
     return (
-        f"☀️ **بولتن روزانه AlphaEngine**\n\n"
-        f"🪙 **BTC:** `${btc_price:,.2f}` (`{btc_change:+.2f}%`)\n"
-        f"📊 **شاخص ترس و طمع:** {fng_val}/100 ({fng_class})\n\n"
+        f"☀️ <b>بولتن روزانه AlphaEngine</b>\n\n"
+        f"🪙 <b>BTC:</b> <code>{btc_price:,.2f}</code> (<code>{btc_change:+.2f}%</code>)\n"
+        f"📊 <b>شاخص ترس و طمع:</b> {fng_val}/100 ({fng_class})\n\n"
         f"📰 {news_summary}\n\n"
-        f"📢 {CHANNEL_LINK}"
+        f"📢 <a href=\"{CHANNEL_LINK}\">AlphaEngine Official</a>"
     )
 
 
@@ -2544,7 +2542,7 @@ async def daily_digest_scheduler():
                 users = await db_get_all_users(limit=10000)
                 for u in users:
                     try:
-                        await bot.send_message(u["user_id"], digest, parse_mode="Markdown")
+                        await bot.send_message(u["user_id"], digest, parse_mode="HTML", disable_web_page_preview=True)
                         await asyncio.sleep(0.05)
                     except Exception:
                         pass
@@ -2577,12 +2575,12 @@ async def background_alert_checker():
                             await bot.send_message(
                                 chat_id=alert["user_id"],
                                 text=(
-                                    f"🚨 **هشدار قیمت!**\n\n"
-                                    f"🪙 **{alert['symbol']}**\n"
-                                    f"🎯 هدف: `${alert['target_price']}`\n"
-                                    f"💵 فعلی: `${current}`"
+                                    f"🚨 <b>هشدار قیمت!</b>\n\n"
+                                    f"🪙 <b>{alert['symbol']}</b>\n"
+                                    f"🎯 هدف: <code>{alert['target_price']}</code>\n"
+                                    f"💵 فعلی: <code>{current}</code>"
                                 ),
-                                parse_mode="Markdown"
+                                parse_mode="HTML"
                             )
                             await db_delete_alert(alert["id"])
                     except Exception as e:
