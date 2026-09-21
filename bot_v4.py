@@ -134,7 +134,6 @@ async def get_crypto_dataframe(symbol="BTC/USDT", timeframe="1h", limit=100):
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         
-        # اندیکاتورهای فنی
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -357,42 +356,38 @@ async def generate_signal(symbol: str, timeframe: str):
     chart_bytes = await asyncio.to_thread(generate_custom_chart, df, formatted_symbol, timeframe)
     return response_text, chart_bytes
 
-# --- هاندلر پردازش پیام صوتی (Voice Assistant) ---
+# --- هاندلر پردازش پیام صوتی (Voice Assistant - اصلاح‌شده) ---
 @dp.message(F.voice)
 async def handle_voice_message(message: types.Message):
-    msg = await message.answer("🎙 در حال آنالیز ویس شما توسط هوش مصنوعی...")
+    msg = await message.answer("🎙 در حال تحلیل پیام صوتی شما...")
     file_id = message.voice.file_id
-    
-    file = await bot.get_file(file_id)
-    file_path = f"voice_{message.from_user.id}_{message.message_id}.ogg"
-    await bot.download_file(file.file_path, file_path)
 
     try:
-        audio_file = await asyncio.to_thread(genai.upload_file, file_path)
-        
+        file = await bot.get_file(file_id)
+        voice_io = await bot.download_file(file.file_path)
+        audio_bytes = voice_io.read()
+
         prompt = (
             "این یک فایل صوتی از کاربر در مورد بازار کریپتو و ارزهای دیجیتال است. "
             "متن صحبت او را متوجه شو، سوال یا درخواست او را بررسی کن و یک پاسخ جامع، تحلیلی و حرفه‌ای به زبان فارسی ارائه بده."
         )
-        
+
         model = genai.GenerativeModel("gemini-2.0-flash")
-        response = await asyncio.to_thread(model.generate_content, [prompt, audio_file])
-        
-        await msg.edit_text(f"🗣 **پاسخ دستیار صوتی:**\n\n{response.text}", parse_mode="Markdown")
-        
-        try:
-            await asyncio.to_thread(genai.delete_file, audio_file.name)
-        except Exception:
-            pass
+        response = await asyncio.to_thread(
+            model.generate_content,
+            [
+                {"mime_type": "audio/ogg", "data": audio_bytes},
+                prompt
+            ]
+        )
+
+        await msg.edit_text(f"🗣 **پاسخ دستیار هوشمند:**\n\n{response.text}", parse_mode="Markdown")
 
     except Exception as e:
         logging.error(f"Voice handling error: {e}")
-        await msg.edit_text("⚠️ متأسفانه متوجه صدای شما نشدم یا خطایی در پردازش رخ داد.")
-    finally:
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        await msg.edit_text("⚠️ متأسفانه در پردازش فایل صوتی خطایی رخ داد. لطفاً دوباره تلاش کنید.")
 
-# --- هاندلرهای متنی تلگرام ---
+# --- دستور استارت (طراحی شیک و مینیمال) ---
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     user_id = message.from_user.id
@@ -416,16 +411,24 @@ async def start_cmd(message: types.Message):
 
     bot_info = await bot.get_me()
     ref_link = f"https://t.me/{bot_info.username}?start={user_id}"
+    status_text = "✨ VIP" if user["is_vip"] else "Standard 🔑"
+
+    start_text = (
+        f"🏛 **AlphaEngine Terminal Pro**\n"
+        f"────────────────────────\n\n"
+        f"به ترمینال تخصصی تحلیل الگوریتمی بازار کریپتو خوش آمدید.\n\n"
+        f"🔰 **وضعیت حساب:** `{status_text}`\n"
+        f"📡 **وضعیت اتصال:** آنلاین 🟢\n\n"
+        f"💡 **راهنمای سریع:**\n"
+        f"برای دریافت ستاپ معاملاتی و چارت تحلیلی، کافی است **نام نماد** (مانند `BTC` یا `SOL`) را ارسال کرده یا ویس بفرستید.\n\n"
+        f"🎁 **ارتقا به سطح VIP:**\n"
+        f"با دعوت ۳ دوست، دسترسی VIP را به صورت رایگان دریافت کنید.\n"
+        f"🔗 **لینک دعوت اختصاصی:**\n`{ref_link}`\n\n"
+        f"👥 دعوت‌های فعال: **{len(user['referrals'])} از ۳**"
+    )
 
     await message.answer(
-        f"👋 به **AlphaEngine Pro** خوش آمدید!\n\n"
-        f"🎙 **دستیار صوتی فعال است:** می‌توانید سوالات کریپتویی خود را به صورت ویس بفرستید!\n"
-        f"🚨 **رادار پیش‌بینی پامپ/دامپ آنلاین است.**\n\n"
-        f"🎁 **سیستم دعوت و VIP رایگان:**\n"
-        f"با دعوت ۳ نفر به ربات، اشتراک **VIP رایگان** دریافت کنید!\n\n"
-        f"🔗 لینک دعوت اختصاصی شما:\n`{ref_link}`\n"
-        f"👥 تعداد دعوت‌های شما: **{len(user['referrals'])} نفر**\n\n"
-        f"نام ارز مورد نظر خود را ارسال کنید یا ویس بفرستید:",
+        start_text,
         reply_markup=main_keyboard,
         parse_mode="Markdown"
     )
@@ -664,7 +667,7 @@ async def handle_text_input(message: types.Message):
 
     await message.answer(f"⏱ تایم‌فریم تحلیل **{symbol_text}** را انتخاب کنید:", reply_markup=timeframe_keyboard(symbol_text))
 
-# --- رادار هوشمند پیش‌بینی پامپ و دامپ (Pump & Dump Detector) ---
+# --- رادار هوشمند پیش‌بینی پامپ و دامپ ---
 async def pump_dump_detector_loop():
     exchange = ccxt.coinex()
     tracked_symbols = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT', 'ADA/USDT', 'AVAX/USDT', 'LINK/USDT', 'SUI/USDT', 'PEPE/USDT']
@@ -689,7 +692,6 @@ async def pump_dump_detector_loop():
                     current_vol = last_candle['Volume']
                     price_change_pct = ((last_candle['Close'] - last_candle['Open']) / last_candle['Open']) * 100
 
-                    # اگر حجم معاملات ۴ برابر میانگین باشد و رشد/افت شدید داشته باشیم
                     is_volume_spike = (current_vol >= avg_vol * 4) and (avg_vol > 0)
                     
                     alert_type = None
@@ -705,7 +707,7 @@ async def pump_dump_detector_loop():
                         last_alerts[symbol] = now_ts
                         clean_sym = symbol.replace('/', '')
                         alert_msg = (
-                            f"🚨 **هشدار هوشمند رادار پامپ/دامپ!**\n\n"
+                            f"🚨 **هشدار هوشمند رادار بازار!**\n\n"
                             f"🪙 **نماد:** #{clean_sym}\n"
                             f"📊 **نوع هشدار:** {alert_type}\n"
                             f"📈 **تغییر قیمت ۵ دقیقه:** `{price_change_pct:+.2f}%`\n"
