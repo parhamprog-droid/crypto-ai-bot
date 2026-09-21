@@ -24,7 +24,6 @@ from aiohttp import web
 # تنظیمات لاگینگ
 logging.basicConfig(level=logging.INFO)
 
-# پشتیبانی از هر دو نام متغیر محیطی برای جلوگیری از خطای توکن
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "8800494482"))
@@ -39,6 +38,7 @@ dp = Dispatcher()
 
 user_data = {}
 price_alerts = []
+subscribers = set() # ذخیره آیدی کاربران برای هشدارهای فوری پامپ/دامپ
 
 def get_user(user_id: int):
     if user_id not in user_data:
@@ -231,7 +231,7 @@ async def scan_pump_candidates():
             if symbol.endswith("/USDT"):
                 volume = data.get('quoteVolume') or 0
                 change = data.get('percentage') or 0
-                if volume >= 30000 and change >= 2.0:
+                if volume >= 30000 and change >= 3.0:
                     candidates.append({'symbol': symbol, 'change': float(change), 'volume': float(volume)})
         return sorted(candidates, key=lambda x: x['change'], reverse=True)[:5]
     except Exception:
@@ -328,7 +328,7 @@ async def generate_signal(symbol: str, timeframe: str):
     has_ob = df['OrderBlock_Bullish'].iloc[-5:].any()
 
     prompt = f"""
-    تو مدیر ارشد ریسک یک هج‌فاند کریپتو هستی. یک ستاپ فوق‌پیشرفته موسسه‌ای برای {formatted_symbol} در تایم‌فریم {timeframe} صادر کن.
+    تو مدیر ارشد ریسک یک هج‌فاند کریپتو هستی. یک ستاپ فوق‌پیشرفته موسسه‌ای به زبان کاملاً فارسی برای {formatted_symbol} در تایم‌فریم {timeframe} صادر کن.
 
     همگرایی روندهای تایم‌فریم بالاتر (Multi-TF Confluence):
     - روند دیلی (1D): {trend_1d}
@@ -341,7 +341,7 @@ async def generate_signal(symbol: str, timeframe: str):
     - FVG خریداران: {has_fvg} | Order Block: {has_ob}
     - نسبت سفارشات خرید/فروش: {ob_data['ratio']:.2f} | RSI: {rsi:.2f}
 
-    فرمت خروجی دقیقاً طبق ساختار زیر باشد:
+    فرمت خروجی دقیقاً طبق ساختار زیر باشد (کاملاً به زبان فارسی):
 
     ⚡️ AlphaEngine Institutional Multi-TF Setup
     📊 نماد: #{formatted_symbol.replace('/', '')} | تایم‌فریم: {timeframe}
@@ -362,8 +362,8 @@ async def generate_signal(symbol: str, timeframe: str):
     ❌ شرط ابطال ستاپ: [توضیح کوتاه]
 
     🏛 تحلیل پرایس‌اکشن و نقدینگی (SMC & Wyckoff):
-    • تحلیل FVG و اوردربلاک: [۱ خط]
-    • رادار تله نهنگ: [۱ خط]
+    • تحلیل FVG و اوردربلاک: [توضیح فارسی کوتاه]
+    • رادار تله نهنگ: [توضیح فارسی کوتاه]
     """
 
     try:
@@ -378,6 +378,7 @@ async def generate_signal(symbol: str, timeframe: str):
 async def start_cmd(message: types.Message):
     user_id = message.from_user.id
     user = get_user(user_id)
+    subscribers.add(user_id) # اضافه کردن کاربر به لیست دریافت‌کنندگان هشدارهای فوری
     user["state"] = None
 
     args = message.text.split()
@@ -467,6 +468,7 @@ async def callback_my_alerts(callback: types.CallbackQuery):
 
 @dp.message(F.text == "🚀 اسکنر ارزهای پامپی")
 async def pump_scanner_handler(message: types.Message):
+    subscribers.add(message.from_user.id)
     user = get_user(message.from_user.id)
     if not user["is_vip"]:
         await message.answer("🔒 مخصوص کاربران VIP (برای فعال‌سازی ۳ نفر را دعوت کنید).", reply_markup=buy_vip_keyboard())
@@ -485,6 +487,7 @@ async def pump_scanner_handler(message: types.Message):
 
 @dp.message(F.text == "🐳 رادار توکن‌های جدید (DEX)")
 async def dex_radar_handler(message: types.Message):
+    subscribers.add(message.from_user.id)
     user = get_user(message.from_user.id)
     if not user["is_vip"]:
         await message.answer("🔒 مخصوص کاربران VIP (برای فعال‌سازی ۳ نفر را دعوت کنید).", reply_markup=buy_vip_keyboard())
@@ -515,6 +518,7 @@ async def start_risk_calc(message: types.Message):
 
 @dp.message(F.text == "👤 حساب کاربری")
 async def user_profile(message: types.Message):
+    subscribers.add(message.from_user.id)
     user = get_user(message.from_user.id)
     status_text = "💎 VIP" if user["is_vip"] else "👤 رایگان"
     await message.answer(f"👤 **پروفایل کاربری:**\n\n🆔 آیدی: `{message.from_user.id}`\n👑 وضعیت: {status_text}\n👥 تعداد دعوت‌ها: **{len(user['referrals'])}**", parse_mode="Markdown")
@@ -552,6 +556,7 @@ async def handle_timeframe_click(callback: types.CallbackQuery):
 
 @dp.message(F.text)
 async def handle_text_input(message: types.Message):
+    subscribers.add(message.from_user.id)
     text = message.text.strip()
     user = get_user(message.from_user.id)
     state = user.get("state")
@@ -643,6 +648,41 @@ async def handle_text_input(message: types.Message):
 
     await message.answer(f"⏱ تایم‌فریم تحلیل **{symbol_text}** را انتخاب کنید:", reply_markup=timeframe_keyboard(symbol_text))
 
+# --- سیستم هشدار فوری پامپ و دامپ خودکار (Instant Pump & Dump Monitor) ---
+async def instant_pump_dump_monitor():
+    seen_pumps = set()
+    while True:
+        try:
+            await asyncio.sleep(180) # بررسی بازار هر ۳ دقیقه
+            candidates = await scan_pump_candidates()
+            for c in candidates:
+                sym = c['symbol']
+                change = c['change']
+                if change >= 5.0 and sym not in seen_pumps: # اگر رشد بالای ۵ درصد بود
+                    seen_pumps.add(sym)
+                    alert_msg = (
+                        f"🚨 **سیستم هشدار فوری پامپ بازار!** 🔥\n\n"
+                        f"🪙 رمزارز: **#{sym.replace('/', '')}**\n"
+                        f"📈 میزان رشد ناگهانی: `+{change:.2f}%`\n\n"
+                        f"⚡️ فرصت طلایی نوسان‌گیری شناسایی شد. برای تحلیل دقیق، نام ارز را در ربات ارسال کنید."
+                    )
+                    for uid in list(subscribers):
+                        try:
+                            await bot.send_message(uid, alert_msg, parse_mode="Markdown")
+                            await asyncio.sleep(0.05)
+                        except Exception:
+                            pass
+                    # پاکسازی حافظه موقت پس از ۲ ساعت
+                    asyncio.create_task(clear_seen_pump(sym, seen_pumps))
+        except Exception as e:
+            logging.error(f"Pump Monitor Error: {e}")
+            await asyncio.sleep(60)
+
+async def clear_seen_pump(sym, seen_set):
+    await asyncio.sleep(7200)
+    if sym in seen_set:
+        seen_set.remove(sym)
+
 async def generate_daily_digest():
     fng_val, fng_class = "N/A", "N/A"
     try:
@@ -660,7 +700,7 @@ async def generate_daily_digest():
     btc_change = df_btc['Close'].pct_change().iloc[-1] * 100 if df_btc is not None else 0
 
     raw_news = await fetch_crypto_news()
-    prompt = f"یک خلاصه بسیار کوتاه و جذاب (حداکثر ۳ سطر) از مهم‌ترین اخبار کریپتو ارائه بده:\n{raw_news}"
+    prompt = f"یک خلاصه بسیار کوتاه و جذاب (حداکثر ۳ سطر) به زبان فارسی از مهم‌ترین اخبار کریپتو ارائه بده:\n{raw_news}"
     try:
         news_summary = await query_gemini(prompt)
     except Exception:
@@ -680,7 +720,7 @@ async def daily_digest_scheduler():
         now = datetime.datetime.now()
         if now.hour == 8 and now.minute == 0:
             digest_msg = await generate_daily_digest()
-            for u_id in list(user_data.keys()):
+            for u_id in list(subscribers):
                 try:
                     await bot.send_message(u_id, digest_msg, parse_mode="Markdown")
                     await asyncio.sleep(0.05)
@@ -734,6 +774,7 @@ async def main():
     
     asyncio.create_task(background_alert_checker())
     asyncio.create_task(daily_digest_scheduler())
+    asyncio.create_task(instant_pump_dump_monitor()) # فعال‌سازی مانیتورینگ خودکار پامپ
     
     await dp.start_polling(bot)
 
