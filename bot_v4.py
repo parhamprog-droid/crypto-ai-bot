@@ -11,6 +11,9 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
+# استفاده از کتابخانه pydub برای پردازش و تبدیل فایل صوتی
+from pydub import AudioSegment
+
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import (
@@ -50,7 +53,7 @@ def get_user(user_id: int):
         }
     return user_data[user_id]
 
-# --- فراخوانی جمینای با پشتیبان هوشمند ---
+# --- فراخوانی جمینای با پشتیبان هوشمند (پایه gemini-2.0-flash) ---
 async def query_gemini(prompt: str) -> str:
     preferred_models = [
         "gemini-2.0-flash",
@@ -356,38 +359,67 @@ async def generate_signal(symbol: str, timeframe: str):
     chart_bytes = await asyncio.to_thread(generate_custom_chart, df, formatted_symbol, timeframe)
     return response_text, chart_bytes
 
-# --- هاندلر پردازش پیام صوتی (Voice Assistant - اصلاح‌شده) ---
+# --- هاندلر پردازش پیام صوتی با کتابخانه pydub و Gemini 2.0 Flash ---
 @dp.message(F.voice)
 async def handle_voice_message(message: types.Message):
-    msg = await message.answer("🎙 در حال تحلیل پیام صوتی شما...")
+    msg = await message.answer("🎙 در حال تبدیل و تحلیل ویس توسط هوش مصنوعی...")
     file_id = message.voice.file_id
+    
+    ogg_filename = f"voice_{message.message_id}_{message.from_user.id}.ogg"
+    wav_filename = f"voice_{message.message_id}_{message.from_user.id}.wav"
 
     try:
+        # ۱. دانلود فایل صوتی از تلگرام
         file = await bot.get_file(file_id)
-        voice_io = await bot.download_file(file.file_path)
-        audio_bytes = voice_io.read()
+        await bot.download_file(file.file_path, destination=ogg_filename)
+
+        # ۲. تبدیل فرمت ogg به wav استاندارد با کتابخانه pydub
+        sound = AudioSegment.from_file(ogg_filename, format="ogg")
+        sound.export(wav_filename, format="wav")
+
+        # ۳. آپلود فایل WAV به جمینای
+        audio_file = await asyncio.to_thread(
+            genai.upload_file, 
+            path=wav_filename, 
+            mime_type="audio/wav"
+        )
 
         prompt = (
             "این یک فایل صوتی از کاربر در مورد بازار کریپتو و ارزهای دیجیتال است. "
             "متن صحبت او را متوجه شو، سوال یا درخواست او را بررسی کن و یک پاسخ جامع، تحلیلی و حرفه‌ای به زبان فارسی ارائه بده."
         )
 
+        # ۴. پردازش دقیقاً با Gemini 2.0 Flash بدون تغییر نسخه
         model = genai.GenerativeModel("gemini-2.0-flash")
         response = await asyncio.to_thread(
             model.generate_content,
-            [
-                {"mime_type": "audio/ogg", "data": audio_bytes},
-                prompt
-            ]
+            [audio_file, prompt]
         )
 
-        await msg.edit_text(f"🗣 **پاسخ دستیار هوشمند:**\n\n{response.text}", parse_mode="Markdown")
+        # ۵. پاک‌سازی فایل صوتی از جمینای و دیسک
+        try:
+            await asyncio.to_thread(genai.delete_file, audio_file.name)
+        except Exception:
+            pass
+
+        for path in [ogg_filename, wav_filename]:
+            if os.path.exists(path):
+                os.remove(path)
+
+        # ۶. ارسال پاسخ
+        if response and response.text:
+            await msg.edit_text(f"🗣 **پاسخ دستیار صوتی:**\n\n{response.text}", parse_mode="Markdown")
+        else:
+            await msg.edit_text("⚠️ متأسفانه متنی از فایل صوتی تشخیص داده نشد.")
 
     except Exception as e:
         logging.error(f"Voice handling error: {e}")
-        await msg.edit_text("⚠️ متأسفانه در پردازش فایل صوتی خطایی رخ داد. لطفاً دوباره تلاش کنید.")
+        for path in [ogg_filename, wav_filename]:
+            if os.path.exists(path):
+                os.remove(path)
+        await msg.edit_text(f"⚠️ متأسفانه در پردازش فایل صوتی خطایی رخ داد:\n`{e}`", parse_mode="Markdown")
 
-# --- دستور استارت (طراحی شیک و مینیمال) ---
+# --- دستور استارت (شیک و حرفه‌ای) ---
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     user_id = message.from_user.id
