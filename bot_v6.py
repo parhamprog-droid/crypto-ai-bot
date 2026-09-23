@@ -1,29 +1,36 @@
 import os
+import re
+import io
+import html
+import math
+import time
+import string
 import asyncio
 import logging
-import io
-import time
-import re
-import random
-import string
-import asyncpg
+import secrets
+import tempfile
 import datetime
+
+import asyncpg
 import ccxt.async_support as ccxt
 import aiohttp
 import pandas as pd
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 
 from pydub import AudioSegment
 
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, BaseMiddleware, types, F
 from aiogram.filters import Command
+from aiogram.exceptions import (
+    TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
+)
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton,
-    BufferedInputFile
+    BufferedInputFile, ErrorEvent
 )
 from google import genai
 from google.genai import types as genai_types
@@ -56,15 +63,26 @@ logging.basicConfig(
 for handler in logging.root.handlers:
     handler.addFilter(SensitiveFilter())
 
+
+def _env_int(name: str, default: int) -> int:
+    """خواندن امن ENV عددی؛ اگر خراب بود به‌جای کرش، مقدار پیش‌فرض."""
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        logging.warning(f"ENV '{name}' is not a valid integer. Using {default}.")
+        return default
+
+
 # --- خواندن امن ENV ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-ADMIN_ID_RAW = os.getenv("ADMIN_ID", "0")
+ADMIN_ID = _env_int("ADMIN_ID", 0)
 DATABASE_URL = os.getenv("DATABASE_URL")
 PAYMENT_CARD = os.getenv("PAYMENT_CARD", "0000-0000-0000-0000")
 PAYMENT_HOLDER = os.getenv("PAYMENT_HOLDER", "نام صاحب کارت")
-PAYMENT_AMOUNT = int(os.getenv("PAYMENT_AMOUNT", "100000"))
-VIP_PRICE_TOMAN = os.getenv("VIP_PRICE_TOMAN", "100,000")
+PAYMENT_AMOUNT = _env_int("PAYMENT_AMOUNT", 100000)
+# اگر VIP_PRICE_TOMAN ست نشده بود، از PAYMENT_AMOUNT ساخته می‌شود تا این دو هیچ‌وقت ناهماهنگ نشوند
+VIP_PRICE_TOMAN = os.getenv("VIP_PRICE_TOMAN") or f"{PAYMENT_AMOUNT:,}"
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@AlphaEngine_Official")
 CHANNEL_LINK = os.getenv("CHANNEL_LINK", "https://t.me/AlphaEngine_Official")
 
@@ -74,12 +92,6 @@ if not GEMINI_API_KEY:
     raise RuntimeError("❌ ENV 'GEMINI_API_KEY' is not set!")
 if not DATABASE_URL:
     raise RuntimeError("❌ ENV 'DATABASE_URL' is not set!")
-
-try:
-    ADMIN_ID = int(ADMIN_ID_RAW)
-except ValueError:
-    ADMIN_ID = 0
-    logging.warning(f"ADMIN_ID '{ADMIN_ID_RAW}' is not a valid integer. Using 0.")
 
 # --- کلاینت Gemini ---
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
@@ -100,6 +112,8 @@ _AVAILABLE_GEMINI_MODELS = None
 
 # --- تنظیمات ---
 STATE_TIMEOUT_SECONDS = 300
+# مثلاً کاربر برای واریز پول به اپ بانک می‌رود؛ ۵ دقیقه برای ارسال فیش کم است
+STATE_TIMEOUTS = {"awaiting_payment_receipt": 3600}
 RATE_LIMIT_PER_MINUTE = 5
 MARKET_CACHE_TTL = 60
 MIN_PUMP_VOLUME_USD = 500000
@@ -108,11 +122,24 @@ FREE_VIP_DAYS = 7
 POINTS_FOR_VIP = 10
 POINTS_PER_ANALYSIS = 1
 POINTS_PER_REFERRAL = 5
+MAX_ANALYSIS_POINTS_PER_DAY = 5   # جلوگیری از فارم کردن VIP رایگان با اسپم تحلیل
+MAX_ALERTS_PER_USER = 10
+MAX_VOICE_SECONDS = 60
+GEMINI_TIMEOUT_SECONDS = 40
+DIGEST_HOUR = 8                   # ساعت ارسال بولتن، به وقت تهران
+BOT_TZ = datetime.timezone(datetime.timedelta(hours=3, minutes=30))  # Asia/Tehran (بدون DST)
+VALID_TIMEFRAMES = ("1m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w")
 SYSTEM_SETTINGS = {
     "pump_detector_enabled": True,
     "daily_digest_enabled": True,
     "channel_broadcast_enabled": True,
 }
+
+# کاربر VIP فعال = is_vip و (بدون تاریخ انقضا یا تاریخ انقضا نگذشته)
+SQL_UTC_NOW = "(NOW() AT TIME ZONE 'UTC')"
+VIP_ACTIVE_SQL = (
+    f"(COALESCE(is_vip, FALSE) = TRUE AND (vip_until IS NULL OR vip_until > {SQL_UTC_NOW}))"
+)
 
 # --- دستور سیستمی ---
 PERSIAN_SYSTEM_INSTRUCTION = (
@@ -135,6 +162,11 @@ PERSIAN_SYSTEM_INSTRUCTION = (
 # ============ توابع پایگاه داده PostgreSQL ==================
 # ============================================================
 
+def utcnow() -> datetime.datetime:
+    """زمان UTC بدون tzinfo؛ سازگار با ستون‌های TIMESTAMP."""
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+
+
 async def init_db():
     global db_pool
     try:
@@ -146,7 +178,9 @@ async def init_db():
 
         db_pool = await asyncpg.create_pool(
             clean_url, min_size=1, max_size=5,
-            command_timeout=60, ssl='require'
+            command_timeout=60, ssl='require',
+            # Neon کانکشن‌های idle را می‌بندد؛ قبل از آن خودمان بازیافتشان می‌کنیم
+            max_inactive_connection_lifetime=120,
         )
 
         async with db_pool.acquire() as conn:
@@ -218,11 +252,14 @@ async def init_db():
                 CREATE INDEX IF NOT EXISTS idx_alerts_user ON price_alerts(user_id);
                 CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users(last_seen);
                 CREATE INDEX IF NOT EXISTS idx_payment_status ON payment_requests(status);
+                CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id);
             """)
 
             try:
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS vip_until TIMESTAMP;")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS points INTEGER DEFAULT 0;")
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS analysis_points_today INTEGER DEFAULT 0;")
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS analysis_points_date DATE;")
                 logging.info("✅ Migrations applied successfully")
             except Exception as e:
                 logging.warning(f"Migration warning: {e}")
@@ -240,42 +277,63 @@ async def init_db():
         raise
 
 
+async def _build_user(conn, row) -> dict:
+    is_vip = bool(row["is_vip"])
+    vip_until = row["vip_until"]
+    if is_vip and vip_until and vip_until < utcnow():
+        is_vip = False
+        await conn.execute("UPDATE users SET is_vip = FALSE WHERE user_id = $1", row["user_id"])
+    referrals = await conn.fetch(
+        "SELECT referred_id FROM referrals WHERE referrer_id = $1", row["user_id"]
+    )
+    return {
+        "user_id": row["user_id"],
+        "is_vip": is_vip,
+        "vip_until": vip_until,
+        "referred_by": row["referred_by"],
+        "points": row["points"] or 0,
+        "usage_count": row["usage_count"] or 0,
+        "referrals": [r["referred_id"] for r in referrals],
+    }
+
+
 async def db_get_or_create_user(user_id: int) -> dict:
+    """کاربر را می‌خواند یا می‌سازد. کلید 'is_new' مشخص می‌کند همین الان ساخته شده یا نه."""
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
-        if not row:
-            await conn.execute(
-                "INSERT INTO users (user_id, is_vip) VALUES ($1, $2)",
+        is_new = False
+        if row is None:
+            # ON CONFLICT: اگر دو پیام هم‌زمان بیایند، یکی‌شان خطای Duplicate نمی‌گیرد
+            inserted = await conn.fetchval(
+                "INSERT INTO users (user_id, is_vip) VALUES ($1, $2) "
+                "ON CONFLICT (user_id) DO NOTHING RETURNING user_id",
                 user_id, (user_id == ADMIN_ID and ADMIN_ID != 0)
             )
+            is_new = inserted is not None
             row = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
         else:
             await conn.execute("UPDATE users SET last_seen = NOW() WHERE user_id = $1", user_id)
+        user = await _build_user(conn, row)
+        user["is_new"] = is_new
+        return user
 
-        is_vip = row["is_vip"]
-        vip_until = row.get("vip_until")
-        if is_vip and vip_until and vip_until < datetime.datetime.now():
-            is_vip = False
-            await conn.execute("UPDATE users SET is_vip = FALSE WHERE user_id = $1", user_id)
 
-        referrals = await conn.fetch(
-            "SELECT referred_id FROM referrals WHERE referrer_id = $1", user_id
-        )
-        return {
-            "user_id": row["user_id"],
-            "is_vip": is_vip,
-            "vip_until": vip_until,
-            "referred_by": row.get("referred_by"),
-            "points": row.get("points") or 0,
-            "usage_count": row.get("usage_count") or 0,
-            "referrals": [r["referred_id"] for r in referrals],
-        }
+async def db_get_user(user_id: int):
+    """فقط می‌خواند و هرگز کاربر جدید نمی‌سازد (برای جستجوی ادمین). اگر نبود None."""
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
+        return await _build_user(conn, row) if row else None
+
+
+async def db_touch_user(user_id: int):
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET last_seen = NOW() WHERE user_id = $1", user_id)
 
 
 async def db_set_vip(user_id: int, is_vip: bool, days: int = 0):
     async with db_pool.acquire() as conn:
         if is_vip and days > 0:
-            until = datetime.datetime.now() + datetime.timedelta(days=days)
+            until = utcnow() + datetime.timedelta(days=days)
             await conn.execute(
                 "UPDATE users SET is_vip = TRUE, vip_until = $1 WHERE user_id = $2",
                 until, user_id
@@ -288,16 +346,19 @@ async def db_set_vip(user_id: int, is_vip: bool, days: int = 0):
 
 
 async def db_extend_vip(user_id: int, days: int):
+    """تمدید اتمیک؛ اگر VIP هنوز فعال است از تاریخ انقضای فعلی، وگرنه از الان حساب می‌کند."""
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT vip_until FROM users WHERE user_id = $1", user_id)
-        now = datetime.datetime.now()
-        base = row["vip_until"] if (row and row["vip_until"] and row["vip_until"] > now) else now
-        new_until = base + datetime.timedelta(days=days)
         await conn.execute(
-            "UPDATE users SET is_vip = TRUE, vip_until = $1 WHERE user_id = $2",
-            new_until, user_id
+            "INSERT INTO users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", user_id
         )
-        return new_until
+        return await conn.fetchval(f"""
+            UPDATE users
+            SET is_vip = TRUE,
+                vip_until = GREATEST(COALESCE(vip_until, {SQL_UTC_NOW}), {SQL_UTC_NOW})
+                            + make_interval(days => $2::int)
+            WHERE user_id = $1
+            RETURNING vip_until
+        """, user_id, days)
 
 
 async def db_is_vip(user_id: int) -> bool:
@@ -305,7 +366,7 @@ async def db_is_vip(user_id: int) -> bool:
         row = await conn.fetchrow("SELECT is_vip, vip_until FROM users WHERE user_id = $1", user_id)
         if not row or not row["is_vip"]:
             return False
-        if row["vip_until"] and row["vip_until"] < datetime.datetime.now():
+        if row["vip_until"] and row["vip_until"] < utcnow():
             await conn.execute("UPDATE users SET is_vip = FALSE WHERE user_id = $1", user_id)
             return False
         return True
@@ -319,6 +380,25 @@ async def db_add_points(user_id: int, points: int):
         )
 
 
+async def db_add_analysis_points(user_id: int) -> bool:
+    """امتیاز تحلیل؛ حداکثر MAX_ANALYSIS_POINTS_PER_DAY در روز. True اگر امتیاز داده شد."""
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE users
+            SET points = COALESCE(points, 0) + $2,
+                analysis_points_today = CASE
+                    WHEN analysis_points_date = CURRENT_DATE
+                    THEN COALESCE(analysis_points_today, 0) + $2
+                    ELSE $2 END,
+                analysis_points_date = CURRENT_DATE
+            WHERE user_id = $1
+              AND (analysis_points_date IS DISTINCT FROM CURRENT_DATE
+                   OR COALESCE(analysis_points_today, 0) + $2 <= $3)
+            RETURNING points
+        """, user_id, POINTS_PER_ANALYSIS, MAX_ANALYSIS_POINTS_PER_DAY)
+        return row is not None
+
+
 async def db_get_points(user_id: int) -> int:
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT points FROM users WHERE user_id = $1", user_id)
@@ -326,38 +406,42 @@ async def db_get_points(user_id: int) -> int:
 
 
 async def db_deduct_points(user_id: int, points: int) -> bool:
+    """کسر اتمیک: بررسی و کسر در یک دستور SQL تا با دو کلیک هم‌زمان دوبار کسر/استفاده نشود."""
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT points FROM users WHERE user_id = $1", user_id)
-        current = (row["points"] if row else 0) or 0
-        if current < points:
-            return False
-        await conn.execute(
-            "UPDATE users SET points = points - $1 WHERE user_id = $2",
+        row = await conn.fetchrow(
+            "UPDATE users SET points = points - $1 "
+            "WHERE user_id = $2 AND COALESCE(points, 0) >= $1 RETURNING points",
             points, user_id
         )
-        return True
+        return row is not None
 
 
 async def db_add_referral(referrer_id: int, referred_id: int):
     async with db_pool.acquire() as conn:
-        existing = await conn.fetchrow("SELECT 1 FROM referrals WHERE referred_id = $1", referred_id)
-        if existing:
-            return None
-        await conn.execute(
-            "INSERT INTO referrals (referrer_id, referred_id) VALUES ($1, $2)",
-            referrer_id, referred_id
-        )
-        await conn.execute(
-            "UPDATE users SET referred_by = $1 WHERE user_id = $2 AND referred_by IS NULL",
-            referrer_id, referred_id
-        )
-        await conn.execute(
-            "UPDATE users SET points = COALESCE(points, 0) + $1 WHERE user_id = $2",
-            POINTS_PER_REFERRAL, referrer_id
-        )
-        count = await conn.fetchval(
-            "SELECT COUNT(*) FROM referrals WHERE referrer_id = $1", referrer_id
-        )
+        async with conn.transaction():
+            referrer_exists = await conn.fetchval(
+                "SELECT 1 FROM users WHERE user_id = $1", referrer_id
+            )
+            if not referrer_exists:
+                return None
+            inserted = await conn.fetchval(
+                "INSERT INTO referrals (referrer_id, referred_id) VALUES ($1, $2) "
+                "ON CONFLICT (referred_id) DO NOTHING RETURNING referred_id",
+                referrer_id, referred_id
+            )
+            if inserted is None:
+                return None
+            await conn.execute(
+                "UPDATE users SET referred_by = $1 WHERE user_id = $2 AND referred_by IS NULL",
+                referrer_id, referred_id
+            )
+            await conn.execute(
+                "UPDATE users SET points = COALESCE(points, 0) + $1 WHERE user_id = $2",
+                POINTS_PER_REFERRAL, referrer_id
+            )
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM referrals WHERE referrer_id = $1", referrer_id
+            )
         return {"count": count, "new_points": POINTS_PER_REFERRAL}
 
 
@@ -386,9 +470,19 @@ async def db_get_all_alerts() -> list:
         return [dict(r) for r in rows]
 
 
-async def db_delete_alert(alert_id: int):
+async def db_delete_alert(alert_id: int, user_id: int = None) -> bool:
+    """حذف هشدار؛ اگر user_id داده شود فقط مالک می‌تواند حذف کند. True اگر واقعاً حذف شد."""
     async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM price_alerts WHERE id = $1", alert_id)
+        if user_id is None:
+            row = await conn.fetchrow(
+                "DELETE FROM price_alerts WHERE id = $1 RETURNING id", alert_id
+            )
+        else:
+            row = await conn.fetchrow(
+                "DELETE FROM price_alerts WHERE id = $1 AND user_id = $2 RETURNING id",
+                alert_id, user_id
+            )
+        return row is not None
 
 
 async def db_clear_all_alerts():
@@ -442,7 +536,7 @@ async def db_get_all_users(limit: int = 20, order: str = "last_seen") -> list:
     async with db_pool.acquire() as conn:
         if order == "vip":
             rows = await conn.fetch(
-                "SELECT * FROM users WHERE is_vip = TRUE ORDER BY last_seen DESC LIMIT $1", limit
+                f"SELECT * FROM users WHERE {VIP_ACTIVE_SQL} ORDER BY last_seen DESC LIMIT $1", limit
             )
         else:
             rows = await conn.fetch(
@@ -451,10 +545,26 @@ async def db_get_all_users(limit: int = 20, order: str = "last_seen") -> list:
         return [dict(r) for r in rows]
 
 
+async def db_get_broadcast_ids(target: str = "all") -> list:
+    """آیدی مخاطبان پیام همگانی (بدون کاربران بن‌شده). target: all | vip | free"""
+    conditions = {
+        "all": "TRUE",
+        "vip": VIP_ACTIVE_SQL,
+        "free": f"NOT {VIP_ACTIVE_SQL}",
+    }
+    cond = conditions.get(target, "TRUE")
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"SELECT user_id FROM users WHERE {cond} "
+            f"AND user_id NOT IN (SELECT user_id FROM banned_users)"
+        )
+        return [r["user_id"] for r in rows]
+
+
 async def db_count_users() -> dict:
     async with db_pool.acquire() as conn:
         total = await conn.fetchval("SELECT COUNT(*) FROM users")
-        vips = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_vip = TRUE")
+        vips = await conn.fetchval(f"SELECT COUNT(*) FROM users WHERE {VIP_ACTIVE_SQL}")
         banned = await conn.fetchval("SELECT COUNT(*) FROM banned_users")
         today = await conn.fetchval(
             "SELECT COUNT(*) FROM users WHERE last_seen >= CURRENT_DATE"
@@ -465,7 +575,7 @@ async def db_count_users() -> dict:
 async def db_get_settings() -> dict:
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT key, value FROM system_settings")
-        return {r["key"]: (r["value"] == "true") for r in rows}
+        return {r["key"]: (r["value"] == "true") for r in rows if r["key"] in SYSTEM_SETTINGS}
 
 
 async def db_set_setting(key: str, value: bool):
@@ -474,6 +584,20 @@ async def db_set_setting(key: str, value: bool):
             INSERT INTO system_settings (key, value) VALUES ($1, $2)
             ON CONFLICT (key) DO UPDATE SET value = $2
         """, key, str(value).lower())
+
+
+async def db_get_kv(key: str):
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT value FROM system_settings WHERE key = $1", key)
+        return row["value"] if row else None
+
+
+async def db_set_kv(key: str, value: str):
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO system_settings (key, value) VALUES ($1, $2)
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+        """, key, value)
 
 
 async def db_create_payment_request(user_id: int, amount: int, receipt_file_id: str) -> int:
@@ -500,6 +624,27 @@ async def db_update_payment_request(req_id: int, status: str, note: str = None):
         """, status, note, req_id)
 
 
+async def db_resolve_payment(req_id: int, status: str, note: str = None):
+    """تعیین تکلیف اتمیک: فقط اگر هنوز pending باشد عوض می‌شود. (جلوگیری از تأیید دوباره با دوبار کلیک)"""
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE payment_requests
+            SET status = $1, admin_note = $2, reviewed_at = NOW()
+            WHERE id = $3 AND status = 'pending'
+            RETURNING *
+        """, status, note, req_id)
+        return dict(row) if row else None
+
+
+async def db_user_has_pending_payment(user_id: int) -> bool:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT 1 FROM payment_requests WHERE user_id = $1 AND status = 'pending' LIMIT 1",
+            user_id
+        )
+        return row is not None
+
+
 async def db_get_pending_payments() -> list:
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(
@@ -509,8 +654,10 @@ async def db_get_pending_payments() -> list:
 
 
 async def db_create_discount_code(created_by: int, days_valid: int = 7) -> str:
-    code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-    expires = datetime.datetime.now() + datetime.timedelta(days=days_valid)
+    # secrets به‌جای random: کد قابل پیش‌بینی نباشد
+    alphabet = string.ascii_uppercase + string.digits
+    code = ''.join(secrets.choice(alphabet) for _ in range(8))
+    expires = utcnow() + datetime.timedelta(days=days_valid)
     async with db_pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO discount_codes (code, created_by, expires_at)
@@ -520,20 +667,26 @@ async def db_create_discount_code(created_by: int, days_valid: int = 7) -> str:
 
 
 async def db_redeem_code(code: str, user_id: int):
+    """مصرف اتمیک کد: فقط یک نفر می‌تواند یک کد را بگیرد، حتی با ارسال هم‌زمان."""
+    code = code.strip().upper()
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM discount_codes WHERE code = $1", code.upper())
-        if not row:
-            return {"ok": False, "msg": "کد نامعتبر است."}
-        if row["is_used"]:
-            return {"ok": False, "msg": "این کد قبلاً استفاده شده."}
-        if row["expires_at"] and row["expires_at"] < datetime.datetime.now():
-            return {"ok": False, "msg": "این کد منقضی شده."}
-        await conn.execute("""
+        row = await conn.fetchrow(f"""
             UPDATE discount_codes
             SET is_used = TRUE, used_by = $1, used_at = NOW()
-            WHERE code = $2
-        """, user_id, code.upper())
-    return {"ok": True, "days": FREE_VIP_DAYS}
+            WHERE code = $2 AND is_used = FALSE
+              AND (expires_at IS NULL OR expires_at > {SQL_UTC_NOW})
+            RETURNING code
+        """, user_id, code)
+        if row:
+            return {"ok": True, "days": FREE_VIP_DAYS}
+        existing = await conn.fetchrow(
+            "SELECT is_used FROM discount_codes WHERE code = $1", code
+        )
+    if not existing:
+        return {"ok": False, "msg": "کد نامعتبر است."}
+    if existing["is_used"]:
+        return {"ok": False, "msg": "این کد قبلاً استفاده شده."}
+    return {"ok": False, "msg": "این کد منقضی شده."}
 
 
 async def db_get_codes(limit: int = 20) -> list:
@@ -551,12 +704,62 @@ def is_admin(user_id: int) -> bool:
     return ADMIN_ID != 0 and user_id == ADMIN_ID
 
 
-def escape_md(text: str) -> str:
-    if not text:
-        return ""
-    for ch in ['_', '*', '`', '[']:
-        text = text.replace(ch, f"\\{ch}")
-    return text
+_DIGIT_TABLE = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+
+
+def parse_number(text):
+    """عدد را از ورودی کاربر می‌خواند: ارقام فارسی/عربی، ویرگول هزارگان و ممیز فارسی را می‌فهمد.
+    نامعتبر (متن، nan، inf) → None"""
+    if text is None:
+        return None
+    t = str(text).strip().translate(_DIGIT_TABLE)
+    for ch in (",", "٬", " "):
+        t = t.replace(ch, "")
+    t = t.replace("٫", ".")
+    try:
+        value = float(t)
+    except ValueError:
+        return None
+    return value if math.isfinite(value) else None
+
+
+def normalize_symbol(text):
+    """BTC / btc / BTCUSDT / BTC/USDT → 'BTC/USDT'. نامعتبر → None.
+    اعتبارسنجی سخت‌گیرانه، چون همین مقدار داخل callback_data (حداکثر ۶۴ بایت) و پیام‌های HTML می‌رود."""
+    s = (text or "").strip().upper().replace(" ", "")
+    if s.endswith("/USDT"):
+        base = s[:-5]
+    elif s.endswith("USDT") and len(s) > 4:
+        base = s[:-4]
+    else:
+        base = s
+    if base == "USDT" or not re.fullmatch(r"[A-Z0-9]{2,12}", base):
+        return None
+    return f"{base}/USDT"
+
+
+def fmt_price(x) -> str:
+    """قیمت را بدون نمای علمی و بدون گرد کردن مخرب برای ارزهای ریز (مثل PEPE) فرمت می‌کند."""
+    x = float(x)
+    if x == 0:
+        return "0"
+    if abs(x) >= 1000:
+        s = f"{x:.2f}"
+    elif abs(x) >= 1:
+        s = f"{x:.4f}"
+    else:
+        s = f"{x:.8f}"
+    return s.rstrip("0").rstrip(".") if "." in s else s
+
+
+def format_ai_text(text: str) -> str:
+    """خروجی Gemini را برای parse_mode=HTML تلگرام امن می‌کند.
+    بدون این کار، یک '<' یا '&' در متن (مثلاً «RSI < 30») کل پیام را با خطا رد می‌کند."""
+    text = html.escape(text or "", quote=False)
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text, flags=re.S)
+    text = re.sub(r"(?m)^[ \t]*[\*\-][ \t]+", "• ", text)
+    text = text.replace("`", "")
+    return text.strip()
 
 
 def chunk_text(text: str, size: int = 4000) -> list:
@@ -580,6 +783,7 @@ def check_rate_limit(user_id: int) -> bool:
     user_times = rate_limit.get(user_id, [])
     user_times = [t for t in user_times if now - t < 60]
     if len(user_times) >= RATE_LIMIT_PER_MINUTE:
+        rate_limit[user_id] = user_times
         return False
     user_times.append(now)
     rate_limit[user_id] = user_times
@@ -587,10 +791,12 @@ def check_rate_limit(user_id: int) -> bool:
 
 
 def check_state_timeout(user_id: int) -> bool:
-    st = user_cache.get(user_id, {}).get("state_updated")
+    entry = user_cache.get(user_id, {})
+    st = entry.get("state_updated")
     if not st:
         return True
-    if time.time() - st > STATE_TIMEOUT_SECONDS:
+    limit = STATE_TIMEOUTS.get(entry.get("state"), STATE_TIMEOUT_SECONDS)
+    if time.time() - st > limit:
         user_cache[user_id]["state"] = None
         user_cache[user_id]["state_updated"] = None
         return False
@@ -612,7 +818,110 @@ def cache_get(key: str):
 
 
 def cache_set(key: str, data, ttl: int = MARKET_CACHE_TTL):
+    if len(market_cache) > 300:  # جلوگیری از رشد بی‌پایان حافظه
+        now = time.time()
+        for k in [k for k, v in market_cache.items() if v["expires"] <= now]:
+            market_cache.pop(k, None)
     market_cache[key] = {"data": data, "expires": time.time() + ttl}
+
+
+# --- ارسال امن (Rate Limit تلگرام، کاربرانی که بات را بلاک کرده‌اند) ---
+_bg_tasks = set()
+
+
+def spawn(coro):
+    """اجرای coroutine در پس‌زمینه با نگه داشتن رفرنس (وگرنه ممکن است garbage collect شود)."""
+    task = asyncio.create_task(coro)
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+    return task
+
+
+async def safe_send(chat_id, text: str, **kwargs) -> bool:
+    for _ in range(3):
+        try:
+            await bot.send_message(chat_id, text, **kwargs)
+            return True
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after + 1)
+        except TelegramForbiddenError:
+            return False  # کاربر بات را بلاک کرده
+        except Exception as e:
+            logging.warning(f"send to {chat_id} failed: {type(e).__name__}")
+            return False
+    return False
+
+
+async def broadcast_to(user_ids: list, text: str, **kwargs) -> int:
+    sent = 0
+    for uid in user_ids:
+        if await safe_send(uid, text, parse_mode="HTML", **kwargs):
+            sent += 1
+        await asyncio.sleep(0.05)
+    return sent
+
+
+async def send_chunked(msg: types.Message, message: types.Message, text: str):
+    """اولین تکه با edit پیام «در حال پردازش»، بقیه پیام جدید؛ اگر HTML خراب بود متن ساده."""
+    chunks = chunk_text(text)
+    try:
+        await msg.edit_text(chunks[0], parse_mode="HTML")
+        for c in chunks[1:]:
+            await message.answer(c, parse_mode="HTML")
+    except Exception:
+        await msg.edit_text(chunks[0])
+        for c in chunks[1:]:
+            await message.answer(c)
+
+
+# --- یک Exchange مشترک (به‌جای ساخت و load_markets در هر درخواست) ---
+_exchange = None
+
+
+def get_exchange():
+    global _exchange
+    if _exchange is None:
+        _exchange = ccxt.coinex({"enableRateLimit": True})
+    return _exchange
+
+
+async def close_exchange():
+    global _exchange
+    if _exchange is not None:
+        try:
+            await _exchange.close()
+        except Exception:
+            pass
+        _exchange = None
+
+
+# --- Middleware: بن‌شده‌ها همه‌جا (نه فقط چند هندلر) بلاک می‌شوند ---
+_last_touch = {}
+
+
+class BanAndTouchMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        user = getattr(event, "from_user", None)
+        if user and not is_admin(user.id):
+            try:
+                if await db_is_banned(user.id):
+                    text = "🚫 شما از استفاده از بات محروم شده‌اید."
+                    if isinstance(event, types.CallbackQuery):
+                        await event.answer(text, show_alert=True)
+                    else:
+                        await event.answer(text)
+                    return None
+            except Exception as e:
+                logging.error(f"Ban check failed: {type(e).__name__}")
+        if user:
+            now = time.time()
+            if now - _last_touch.get(user.id, 0) > 300:
+                _last_touch[user.id] = now
+                try:
+                    await db_touch_user(user.id)
+                except Exception:
+                    pass
+        return await handler(event, data)
 
 
 def get_main_keyboard(user_id: int):
@@ -795,114 +1104,133 @@ def vip_action_keyboard(target_uid: int, is_vip: bool, is_banned: bool):
 async def get_available_models():
     global _AVAILABLE_GEMINI_MODELS
     if _AVAILABLE_GEMINI_MODELS is not None:
-        return _AVAILABLE_GEMINI_MODELS
-    preferred = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.0-flash-lite"]
+        return list(_AVAILABLE_GEMINI_MODELS)
+    preferred = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-2.0-flash-lite"]
     try:
-        response = await asyncio.to_thread(gemini_client.models.list)
-        dynamic = []
-        for m in response:
+        # models.list() صفحه‌بندی تنبل است؛ باید داخل thread کامل خوانده شود، نه در event loop
+        models = await asyncio.to_thread(lambda: list(gemini_client.models.list()))
+        names = set()
+        for m in models:
             try:
-                if hasattr(m, "supported_actions") and m.supported_actions:
-                    if "generateContent" in m.supported_actions:
-                        dynamic.append(m.name.replace("models/", ""))
-                elif hasattr(m, "supported_generation_methods") and m.supported_generation_methods:
-                    if "generateContent" in m.supported_generation_methods:
-                        dynamic.append(m.name.replace("models/", ""))
+                actions = (getattr(m, "supported_actions", None)
+                           or getattr(m, "supported_generation_methods", None) or [])
+                if "generateContent" in actions:
+                    names.add(m.name.replace("models/", ""))
             except Exception:
                 continue
-        combined = list(dict.fromkeys(preferred + dynamic))
-        _AVAILABLE_GEMINI_MODELS = combined
-        logging.info(f"✅ Available Gemini models: {combined[:5]}...")
-        return combined
+        available = [m for m in preferred if m in names]
+        if not available:
+            # مدل‌های تصویر/صوت/embedding را کنار می‌گذاریم و حداکثر ۴ مدل متنی را نگه می‌داریم
+            skip = ("image", "tts", "embedding", "live", "audio", "vision", "robotics", "computer")
+            available = [n for n in sorted(names)
+                         if n.startswith("gemini-") and not any(s in n for s in skip)][:4]
+        if not available:
+            raise RuntimeError("no usable Gemini model found")
+        _AVAILABLE_GEMINI_MODELS = available
+        logging.info(f"✅ Available Gemini models: {available}")
+        return list(available)
     except Exception as e:
         logging.warning(f"ListModels failed: {e}")
-        _AVAILABLE_GEMINI_MODELS = preferred
-        return preferred
+        return list(preferred)
 
 
 async def query_gemini(prompt: str) -> str:
-    candidate_models = await get_available_models()
+    models = await get_available_models()  # کپی است؛ حذف مدل از لیست وسط حلقه، عنصر بعدی را نمی‌پراند
     last_error = None
-    for model_name in candidate_models:
+    for model_name in models:
         try:
-            response = await asyncio.to_thread(
-                gemini_client.models.generate_content,
-                model=model_name,
-                contents=prompt,
-                config=genai_types.GenerateContentConfig(
-                    system_instruction=PERSIAN_SYSTEM_INSTRUCTION,
-                    temperature=0.7,
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    gemini_client.models.generate_content,
+                    model=model_name,
+                    contents=prompt,
+                    config=genai_types.GenerateContentConfig(
+                        system_instruction=PERSIAN_SYSTEM_INSTRUCTION,
+                        temperature=0.7,
+                    ),
                 ),
+                timeout=GEMINI_TIMEOUT_SECONDS,
             )
-            if response and response.text:
-                return response.text
+            text = response.text if response else None
+            if text:
+                return text
         except Exception as e:
-            err_str = str(e)
             last_error = e
             logging.warning(f"Gemini '{model_name}' failed: {type(e).__name__}")
-            if "404" in err_str or "NOT_FOUND" in err_str:
-                global _AVAILABLE_GEMINI_MODELS
-                if _AVAILABLE_GEMINI_MODELS and model_name in _AVAILABLE_GEMINI_MODELS:
-                    _AVAILABLE_GEMINI_MODELS.remove(model_name)
-            continue
-    raise last_error or Exception("هیچ‌کدام از مدل‌های Gemini پاسخ ندادند.")
+            err_str = str(e)
+            if ("404" in err_str or "NOT_FOUND" in err_str) and _AVAILABLE_GEMINI_MODELS \
+                    and model_name in _AVAILABLE_GEMINI_MODELS:
+                _AVAILABLE_GEMINI_MODELS.remove(model_name)
+    raise last_error or RuntimeError("هیچ‌کدام از مدل‌های Gemini پاسخ ندادند.")
 
 
 # ============================================================
 # ==================== توابع داده بازار ======================
 # ============================================================
 
-async def get_crypto_dataframe(symbol="BTC/USDT", timeframe="1h", limit=100):
-    cache_key = f"df:{symbol}:{timeframe}:{limit}"
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+    df['RSI'] = df['RSI'].fillna(50)
+
+    df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
+    df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
+
+    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
+    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = exp1 - exp2
+    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+
+    df['BB_Middle'] = df['Close'].rolling(window=20).mean()
+    df['BB_Std'] = df['Close'].rolling(window=20).std()
+    df['BB_Upper'] = df['BB_Middle'] + (df['BB_Std'] * 2)
+    df['BB_Lower'] = df['BB_Middle'] - (df['BB_Std'] * 2)
+    df['BB_Width'] = (df['BB_Upper'] - df['BB_Lower']) / df['BB_Middle']
+
+    df['FVG_Bullish'] = (df['Low'] > df['High'].shift(2))
+    df['FVG_Bearish'] = (df['High'] < df['Low'].shift(2))
+    avg_vol = df['Volume'].rolling(10).mean()
+    df['OrderBlock_Bullish'] = (
+        (df['Close'] > df['Open'])
+        & (df['Close'].shift(1) < df['Open'].shift(1))
+        & (df['Volume'] > avg_vol * 1.5)
+    )
+    df['OrderBlock_Bearish'] = (
+        (df['Close'] < df['Open'])
+        & (df['Close'].shift(1) > df['Open'].shift(1))
+        & (df['Volume'] > avg_vol * 1.5)
+    )
+
+    df['TR'] = np.maximum(df['High'] - df['Low'], np.maximum(
+        abs(df['High'] - df['Close'].shift(1)), abs(df['Low'] - df['Close'].shift(1))
+    ))
+    df['ATR'] = df['TR'].rolling(window=14).mean()
+    return df
+
+
+async def get_crypto_dataframe(symbol="BTC/USDT", timeframe="1h", limit=300):
+    # limit پیش‌فرض ۳۰۰ است: EMA200 روی ۱۰۰ کندل هنوز گرم نشده و عدد نادرست می‌دهد
+    formatted_symbol = normalize_symbol(symbol)
+    if not formatted_symbol:
+        return None, None
+
+    cache_key = f"df:{formatted_symbol}:{timeframe}:{limit}"
     cached = cache_get(cache_key)
     if cached is not None:
         return cached
 
-    exchange = ccxt.coinex()
     try:
-        formatted_symbol = symbol.upper().strip()
-        if not formatted_symbol.endswith("/USDT") and not formatted_symbol.endswith("USDT"):
-            formatted_symbol = f"{formatted_symbol}/USDT"
-        elif formatted_symbol.endswith("USDT") and "/" not in formatted_symbol:
-            formatted_symbol = formatted_symbol.replace("USDT", "/USDT")
-
-        ohlcv = await exchange.fetch_ohlcv(formatted_symbol, timeframe=timeframe, limit=limit)
+        ohlcv = await get_exchange().fetch_ohlcv(formatted_symbol, timeframe=timeframe, limit=limit)
+        if not ohlcv or len(ohlcv) < 15:
+            return None, None
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-
-        delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs))
-        df['RSI'] = df['RSI'].fillna(50)
-
-        df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
-        df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
-
-        exp1 = df['Close'].ewm(span=12, adjust=False).mean()
-        exp2 = df['Close'].ewm(span=26, adjust=False).mean()
-        df['MACD'] = exp1 - exp2
-        df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-
-        df['BB_Middle'] = df['Close'].rolling(window=20).mean()
-        df['BB_Std'] = df['Close'].rolling(window=20).std()
-        df['BB_Upper'] = df['BB_Middle'] + (df['BB_Std'] * 2)
-        df['BB_Lower'] = df['BB_Middle'] - (df['BB_Std'] * 2)
-        df['BB_Width'] = (df['BB_Upper'] - df['BB_Lower']) / df['BB_Middle']
-
-        df['FVG_Bullish'] = (df['Low'] > df['High'].shift(2))
-        df['FVG_Bearish'] = (df['High'] < df['Low'].shift(2))
-        df['OrderBlock_Bullish'] = (
-            (df['Close'] > df['Open'])
-            & (df['Close'].shift(1) < df['Open'].shift(1))
-            & (df['Volume'] > df['Volume'].rolling(10).mean() * 1.5)
-        )
-        df['OrderBlock_Bearish'] = (
-            (df['Close'] < df['Open'])
-            & (df['Close'].shift(1) > df['Open'].shift(1))
-            & (df['Volume'] > df['Volume'].rolling(10).mean() * 1.5)
-        )
+        df = add_indicators(df)
 
         result = (formatted_symbol, df)
         cache_set(cache_key, result, MARKET_CACHE_TTL)
@@ -910,124 +1238,120 @@ async def get_crypto_dataframe(symbol="BTC/USDT", timeframe="1h", limit=100):
     except Exception as e:
         logging.error(f"CCXT Error ({symbol}): {type(e).__name__}")
         return None, None
-    finally:
-        try:
-            await exchange.close()
-        except Exception:
-            pass
 
 
 async def fetch_orderbook_and_futures(symbol="BTC/USDT"):
-    cache_key = f"ob:{symbol}"
+    formatted_symbol = normalize_symbol(symbol) or symbol
+    cache_key = f"ob:{formatted_symbol}"
     cached = cache_get(cache_key)
     if cached is not None:
         return cached
 
-    exchange = ccxt.coinex()
     try:
-        formatted_symbol = symbol.upper()
-        orderbook = await exchange.fetch_order_book(formatted_symbol, limit=20)
+        orderbook = await get_exchange().fetch_order_book(formatted_symbol, limit=20)
         bids_volume = sum([b[1] for b in orderbook['bids']])
         asks_volume = sum([a[1] for a in orderbook['asks']])
         orderbook_ratio = bids_volume / asks_volume if asks_volume > 0 else 1.0
-        result = {
-            "bids_vol": bids_volume,
-            "asks_vol": asks_volume,
-            "ratio": orderbook_ratio,
-            "open_interest": "افزایشی 📈" if bids_volume > asks_volume else "کاهشی 📉"
-        }
+        result = {"bids_vol": bids_volume, "asks_vol": asks_volume, "ratio": orderbook_ratio}
         cache_set(cache_key, result, MARKET_CACHE_TTL)
         return result
     except Exception:
-        return {"bids_vol": 0, "asks_vol": 0, "ratio": 1.0, "open_interest": "نامشخص ⚪️"}
-    finally:
-        try:
-            await exchange.close()
-        except Exception:
-            pass
+        return {"bids_vol": 0, "asks_vol": 0, "ratio": 1.0}
 
 
 async def fetch_crypto_news():
+    """اخبار خام یا None. (قبلاً در خطا خبر ساختگی برمی‌گشت و به Gemini داده می‌شد.)"""
+    cached = cache_get("news_raw")
+    if cached is not None:
+        return cached
     headers = {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'}
-    connector = aiohttp.TCPConnector(ssl=False)
-    async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
-        try:
-            url1 = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN"
-            async with session.get(url1, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            url = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN"
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    articles = data.get("Data", [])[:5]
-                    if articles:
-                        return "".join([f"- Title: {a.get('title')}\n  Body: {a.get('body')[:150]}...\n\n" for a in articles])
-        except Exception as e:
-            logging.error(f"News Error: {e}")
-    return "- Title: Crypto Market Volatility\n  Body: High volatility continues.\n\n"
+                    articles = data.get("Data", [])
+                    if isinstance(articles, list) and articles:
+                        raw = "".join(
+                            f"- Title: {a.get('title')}\n  Body: {(a.get('body') or '')[:150]}...\n\n"
+                            for a in articles[:5]
+                        )
+                        cache_set("news_raw", raw, 300)
+                        return raw
+    except Exception as e:
+        logging.error(f"News Error: {type(e).__name__}: {e}")
+    return None
 
 
 async def scan_pump_candidates():
-    exchange = ccxt.coinex()
+    cached = cache_get("pump_scan")
+    if cached is not None:
+        return cached
     try:
-        tickers = await exchange.fetch_tickers()
+        tickers = await get_exchange().fetch_tickers()
         candidates = []
         for symbol, data in tickers.items():
-            if symbol.endswith("/USDT"):
-                volume = data.get('quoteVolume') or 0
-                change = data.get('percentage') or 0
-                if volume >= MIN_PUMP_VOLUME_USD and change >= 2.0:
-                    candidates.append({'symbol': symbol, 'change': float(change), 'volume': float(volume)})
-        return sorted(candidates, key=lambda x: x['change'], reverse=True)[:5]
-    except Exception:
+            if not symbol.endswith("/USDT"):
+                continue
+            volume = data.get('quoteVolume') or 0
+            change = data.get('percentage')
+            if change is None:  # بعضی تیکرها percentage ندارند؛ از open/last حساب می‌کنیم
+                o, last = data.get('open'), data.get('last')
+                change = ((last - o) / o * 100) if (o and last) else 0
+            if volume >= MIN_PUMP_VOLUME_USD and change >= 2.0:
+                candidates.append({'symbol': symbol, 'change': float(change), 'volume': float(volume)})
+        result = sorted(candidates, key=lambda x: x['change'], reverse=True)[:5]
+        cache_set("pump_scan", result, MARKET_CACHE_TTL)
+        return result
+    except Exception as e:
+        logging.error(f"Pump scan error: {type(e).__name__}")
         return []
-    finally:
-        try:
-            await exchange.close()
-        except Exception:
-            pass
 
 
 async def fetch_dex_tokens():
+    """لیست توکن‌ها یا None. (قبلاً در خطا داده‌ی ساختگی BONK/WIF به کاربر پولی نشان داده می‌شد.)"""
+    cached = cache_get("dex_tokens")
+    if cached is not None:
+        return cached
     headers = {'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0'}
     url = "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1"
-    async with aiohttp.ClientSession(headers=headers) as session:
-        try:
-            async with session.get(url, timeout=10) as resp:
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    pools = data.get("data", [])
                     filtered = []
-                    for pool in pools:
+                    for pool in data.get("data", []):
                         attr = pool.get("attributes", {})
                         raw_name = attr.get("name", "N/A")
                         symbol = raw_name.split("/")[0].strip() if "/" in raw_name else raw_name
                         raw_price = float(attr.get("base_token_price_usd") or 0)
-                        formatted_price = f"{raw_price:.6f}".rstrip('0').rstrip('.') if raw_price > 0 else "0"
-                        filtered.append({"symbol": symbol, "price": formatted_price})
+                        filtered.append({"symbol": symbol, "price": fmt_price(raw_price)})
                         if len(filtered) >= 5:
                             break
-                    return filtered
-        except Exception as e:
-            logging.error(f"Gecko Error: {e}")
-    return [{"symbol": "BONK", "price": "0.000021"}, {"symbol": "WIF", "price": "1.84"}]
+                    if filtered:
+                        cache_set("dex_tokens", filtered, 120)
+                        return filtered
+    except Exception as e:
+        logging.error(f"Gecko Error: {type(e).__name__}: {e}")
+    return None
 
 
 async def get_ticker_price(symbol: str) -> float:
-    exchange = ccxt.coinex()
+    formatted = normalize_symbol(symbol)
+    if not formatted:
+        return 0.0
     try:
-        ticker = await exchange.fetch_ticker(symbol.upper())
+        ticker = await get_exchange().fetch_ticker(formatted)
         return float(ticker.get('last') or ticker.get('close') or 0)
     except Exception:
         return 0.0
-    finally:
-        try:
-            await exchange.close()
-        except Exception:
-            pass
 
 
 async def send_to_channel(text: str, photo_bytes: bytes = None):
     try:
-        settings = await db_get_settings()
-        if not settings.get("channel_broadcast_enabled", True):
+        if not SYSTEM_SETTINGS.get("channel_broadcast_enabled", True):
             return
         if photo_bytes:
             await bot.send_photo(
@@ -1051,12 +1375,12 @@ async def send_to_channel(text: str, photo_bytes: bytes = None):
 # ============================================================
 
 def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
+    # فقط ۱۲۰ کندل آخر رسم می‌شود؛ اندیکاتورها قبلاً روی داده‌ی بلندتر محاسبه شده‌اند
+    df = df.tail(120).reset_index(drop=True)
     clean_symbol = symbol.replace("/", "")
-    fig, (ax_main, ax_rsi) = plt.subplots(
-        2, 1, figsize=(12, 7),
-        gridspec_kw={'height_ratios': [3, 1]},
-        facecolor='#f8f9fa'
-    )
+    # Figure مستقیم (نه pyplot): pyplot thread-safe نیست و این تابع داخل asyncio.to_thread اجرا می‌شود
+    fig = Figure(figsize=(12, 7), facecolor='#f8f9fa')
+    ax_main, ax_rsi = fig.subplots(2, 1, gridspec_kw={'height_ratios': [3, 1]})
     ax_main.set_facecolor('#ffffff')
     ax_rsi.set_facecolor('#ffffff')
 
@@ -1087,7 +1411,7 @@ def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> byte
 
     last_price = df['Close'].iloc[-1]
     ax_main.axhline(y=last_price, color='red', linestyle='--', linewidth=1)
-    ax_main.text(n - 1, last_price, f" {last_price:.4f}", color='white', backgroundcolor='red',
+    ax_main.text(n - 1, last_price, f" {fmt_price(last_price)}", color='white', backgroundcolor='red',
                  fontsize=8, fontweight='bold', va='center')
 
     ax_main.grid(True, linestyle='--', alpha=0.4, color='#e0e0e0')
@@ -1104,10 +1428,9 @@ def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> byte
     ax_rsi.grid(True, linestyle='--', alpha=0.4, color='#e0e0e0')
     ax_rsi.yaxis.tick_right()
 
-    plt.tight_layout()
+    fig.tight_layout()
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', dpi=130)
-    plt.close(fig)
+    fig.savefig(buf, format='png', bbox_inches='tight', dpi=130)
     buf.seek(0)
     return buf.getvalue()
 
@@ -1116,44 +1439,64 @@ def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> byte
 # ================== تحلیل سیگنال ===========================
 # ============================================================
 
+DISCLAIMER = (
+    "\n\n⚠️ <i>این خروجی الگوریتمی و آموزشی است و توصیه مالی نیست. "
+    "مسئولیت هر معامله با خود شماست؛ همیشه حد ضرر را رعایت کنید.</i>"
+)
+
+
+def _trend_label(d) -> str:
+    if d is None or d.empty:
+        return "نامشخص ⚪️"
+    return "صعودی 🟢" if d['Close'].iloc[-1] > d['EMA_50'].iloc[-1] else "نزولی 🔴"
+
+
+def _yn(v) -> str:
+    return "بله" if bool(v) else "خیر"
+
+
 async def generate_signal(symbol: str, timeframe: str):
+    """خروجی: (متن HTML، بایت چارت یا None، موفق بودن)"""
     formatted_symbol, df = await get_crypto_dataframe(symbol, timeframe)
     if df is None or df.empty:
-        return f"⚠️ ارز <b>{symbol}</b> پیدا نشد.", None
+        return (f"⚠️ ارز <b>{html.escape(str(symbol))}</b> پیدا نشد یا داده‌ای برای این تایم‌فریم وجود ندارد.",
+                None, False)
 
+    # برای تشخیص روند (EMA50) حداقل ~۱۲۰ کندل لازم است؛ ۳۰ کندل قبلی EMA50 را بی‌معنی می‌کرد
     results = await asyncio.gather(
-        get_crypto_dataframe(symbol, "1d", 30),
-        get_crypto_dataframe(symbol, "4h", 30),
-        get_crypto_dataframe("BTC/USDT", "1h", 30),
+        get_crypto_dataframe(formatted_symbol, "1d", 120),
+        get_crypto_dataframe(formatted_symbol, "4h", 120),
+        get_crypto_dataframe("BTC/USDT", "1h", 120),
         fetch_orderbook_and_futures(formatted_symbol),
         return_exceptions=True,
     )
-    (_, df_1d), (_, df_4h), (_, df_btc), ob_data = results
+    df_1d, df_4h, df_btc = (r[1] if isinstance(r, tuple) else None for r in results[:3])
+    ob_data = results[3] if isinstance(results[3], dict) else {"ratio": 1.0}
 
-    if isinstance(df_1d, Exception): df_1d = None
-    if isinstance(df_4h, Exception): df_4h = None
-    if isinstance(df_btc, Exception): df_btc = None
-    if isinstance(ob_data, Exception): ob_data = {"ratio": 1.0}
+    trend_1d = _trend_label(df_1d)
+    trend_4h = _trend_label(df_4h)
+    trend_btc = _trend_label(df_btc)
 
-    trend_1d = "صعودی 🟢" if (df_1d is not None and df_1d['Close'].iloc[-1] > df_1d['EMA_50'].iloc[-1]) else "نزولی 🔴"
-    trend_4h = "صعودی 🟢" if (df_4h is not None and df_4h['Close'].iloc[-1] > df_4h['EMA_50'].iloc[-1]) else "نزولی 🔴"
-    btc_bullish = (df_btc is not None and df_btc['Close'].iloc[-1] > df_btc['EMA_50'].iloc[-1])
+    atr_raw = df['ATR'].iloc[-1]
+    if pd.isna(atr_raw):
+        atr_raw = (df['High'] - df['Low']).tail(14).mean()
+    atr_val = float(atr_raw)
+    atr_for_sl = fmt_price(atr_val * 1.5)
+    atr_sl_max = fmt_price(atr_val * 3)
+    atr_txt = fmt_price(atr_val)
 
-    df['TR'] = np.maximum(df['High'] - df['Low'], np.maximum(
-        abs(df['High'] - df['Close'].shift(1)), abs(df['Low'] - df['Close'].shift(1))
-    ))
-    df['ATR'] = df['TR'].rolling(window=14).mean()
-    atr_val = round(float(df['ATR'].iloc[-1]), 4)
-    atr_for_sl = round(atr_val * 1.5, 4)
-    atr_sl_max = round(atr_val * 3, 4)
-
-    is_squeeze = df['BB_Width'].iloc[-1] < df['BB_Width'].rolling(30).mean().iloc[-1] * 0.7
+    bb_mean = df['BB_Width'].rolling(30).mean().iloc[-1]
+    is_squeeze = bool(df['BB_Width'].iloc[-1] < bb_mean * 0.7)
     squeeze_status = "⚠️ فشرده‌سازی نوسان (آماده‌باش انفجار قیمت 🔥)" if is_squeeze else "عادی 🟢"
 
-    price = df['Close'].iloc[-1]
-    rsi = df['RSI'].iloc[-1]
-    has_fvg = df['FVG_Bullish'].iloc[-3:].any()
-    has_ob = df['OrderBlock_Bullish'].iloc[-5:].any()
+    price = fmt_price(df['Close'].iloc[-1])
+    rsi = float(df['RSI'].iloc[-1])
+    # هر دو جهت به مدل داده می‌شود؛ قبلاً فقط FVG/OB صعودی می‌رفت و تحلیل به سمت Long سوگیری داشت
+    fvg_bull = df['FVG_Bullish'].iloc[-3:].any()
+    fvg_bear = df['FVG_Bearish'].iloc[-3:].any()
+    ob_bull = df['OrderBlock_Bullish'].iloc[-5:].any()
+    ob_bear = df['OrderBlock_Bearish'].iloc[-5:].any()
+    ratio = float(ob_data.get('ratio', 1.0))
 
     prompt = f"""
 تو مدیر ارشد ریسک یک هج‌فاند کریپتو هستی. یک ستاپ فوق‌پیشرفته موسسه‌ای برای {formatted_symbol} در تایم‌فریم {timeframe} صادر کن.
@@ -1161,14 +1504,15 @@ async def generate_signal(symbol: str, timeframe: str):
 همگرایی روندهای تایم‌فریم بالاتر:
 - روند دیلی (1D): {trend_1d}
 - روند چهارساعته (4H): {trend_4h}
-- وضعیت کلان بیت‌کوین: {"صعودی 🟢" if btc_bullish else "نزولی 🔴"}
+- وضعیت کلان بیت‌کوین: {trend_btc}
 
 داده‌های فنی و ICT:
-- قیمت فعلی: {price} | ATR: {atr_val}
+- قیمت فعلی: {price} | ATR: {atr_txt}
 - محدوده مجاز SL بر اساس ATR: حداقل {atr_for_sl} و حداکثر {atr_sl_max} از Entry
 - وضعیت نوسان: {squeeze_status}
-- FVG خریداران: {has_fvg} | Order Block: {has_ob}
-- نسبت سفارشات خرید/فروش: {ob_data.get('ratio', 1.0):.2f} | RSI: {rsi:.2f}
+- FVG صعودی: {_yn(fvg_bull)} | FVG نزولی: {_yn(fvg_bear)}
+- Order Block صعودی: {_yn(ob_bull)} | Order Block نزولی: {_yn(ob_bear)}
+- نسبت سفارشات خرید/فروش: {ratio:.2f} | RSI: {rsi:.2f}
 
 فرمت خروجی دقیقاً طبق ساختار زیر باشد:
 
@@ -1200,15 +1544,22 @@ async def generate_signal(symbol: str, timeframe: str):
 - با ⚡️ شروع کن. هرگز # استفاده نکن. املای فارسی دقیق.
 - SL بین 1.5×ATR و 3×ATR از Entry.
 - Entry Zone حداکثر ۲٪ از قیمت فعلی.
+- اگر داده‌ها متناقض یا ضعیف است، جهت معامله را Wait بگذار.
 """
 
     try:
         response_text = await query_gemini(prompt)
     except Exception as e:
-        return f"⚠️ خطا در تحلیل Gemini:\n<code>{str(e)[:200]}</code>", None
+        # جزئیات خطا فقط در لاگ؛ به کاربر پیام عمومی نشان می‌دهیم
+        logging.error(f"Gemini analysis failed: {type(e).__name__}: {e}")
+        return "⚠️ سرویس تحلیل هوش مصنوعی موقتاً در دسترس نیست. چند دقیقه دیگر دوباره تلاش کنید.", None, False
 
-    chart_bytes = await asyncio.to_thread(generate_custom_chart, df, formatted_symbol, timeframe)
-    return response_text, chart_bytes
+    chart_bytes = None
+    try:
+        chart_bytes = await asyncio.to_thread(generate_custom_chart, df, formatted_symbol, timeframe)
+    except Exception as e:
+        logging.error(f"Chart error: {type(e).__name__}: {e}")
+    return format_ai_text(response_text) + DISCLAIMER, chart_bytes, True
 
 # ============================================================
 # =================== پردازش پیام صوتی ======================
@@ -1217,63 +1568,62 @@ async def generate_signal(symbol: str, timeframe: str):
 @dp.message(F.voice)
 async def handle_voice_message(message: types.Message):
     user_id = message.from_user.id
-    if await db_is_banned(user_id):
-        await message.answer("🚫 شما از استفاده از بات محروم شده‌اید.")
-        return
     if not check_rate_limit(user_id):
         await message.answer("⏱ لطفاً کمی صبر کنید. حداکثر ۵ درخواست در دقیقه.")
         return
+    if message.voice.duration and message.voice.duration > MAX_VOICE_SECONDS:
+        await message.answer(f"⏱ حداکثر مدت ویس {MAX_VOICE_SECONDS} ثانیه است.")
+        return
 
     msg = await message.answer("🎙 در حال تبدیل و تحلیل ویس توسط هوش مصنوعی...")
-    file_id = message.voice.file_id
-    ogg_filename = f"voice_{message.message_id}_{user_id}.ogg"
-    wav_filename = f"voice_{message.message_id}_{user_id}.wav"
+    base = os.path.join(tempfile.gettempdir(), f"voice_{user_id}_{message.message_id}")
+    ogg_filename, wav_filename = base + ".ogg", base + ".wav"
 
     try:
-        file = await bot.get_file(file_id)
+        file = await bot.get_file(message.voice.file_id)
         await bot.download_file(file.file_path, destination=ogg_filename)
-        sound = AudioSegment.from_file(ogg_filename, format="ogg")
-        sound.export(wav_filename, format="wav")
+        models = await get_available_models()
 
-        def _upload_and_analyze():
+        def _convert_upload_analyze():
+            # pydub/ffmpeg و آپلود Gemini همگی blocking هستند؛ باید در thread اجرا شوند
+            sound = AudioSegment.from_file(ogg_filename, format="ogg")
+            sound.export(wav_filename, format="wav")
             uploaded = gemini_client.files.upload(file=wav_filename)
-            prompt = (
-                "این یک فایل صوتی از کاربر در مورد بازار کریپتو است. "
-                "متن صحبت او را متوجه شو، سوال یا درخواست او را بررسی کن و پاسخ جامع بده.\n\n"
-                "⚠️ توضیحات فارسی، اصطلاحات تکنیکال انگلیسی."
-            )
-            models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-pro"]
-            last_exc = None
-            for m_name in models_to_try:
-                try:
-                    resp = gemini_client.models.generate_content(
-                        model=m_name, contents=[uploaded, prompt],
-                        config=genai_types.GenerateContentConfig(system_instruction=PERSIAN_SYSTEM_INSTRUCTION),
-                    )
-                    if resp and resp.text:
-                        return resp.text
-                except Exception as ex:
-                    last_exc = ex
-                    continue
-            if last_exc: raise last_exc
-            return None
-
-        response_text = await asyncio.to_thread(_upload_and_analyze)
-        if response_text:
-            chunks = chunk_text(f"🗣 <b>پاسخ دستیار صوتی:</b>\n\n{response_text}")
             try:
-                await msg.edit_text(chunks[0], parse_mode="HTML")
-                for c in chunks[1:]:
-                    await message.answer(c, parse_mode="HTML")
-            except Exception:
-                await msg.edit_text(chunks[0])
-                for c in chunks[1:]:
-                    await message.answer(c)
+                prompt = (
+                    "این یک فایل صوتی از کاربر در مورد بازار کریپتو است. "
+                    "متن صحبت او را متوجه شو، سوال یا درخواست او را بررسی کن و پاسخ جامع بده.\n\n"
+                    "⚠️ توضیحات فارسی، اصطلاحات تکنیکال انگلیسی."
+                )
+                last_exc = None
+                for m_name in models:
+                    try:
+                        resp = gemini_client.models.generate_content(
+                            model=m_name, contents=[uploaded, prompt],
+                            config=genai_types.GenerateContentConfig(system_instruction=PERSIAN_SYSTEM_INSTRUCTION),
+                        )
+                        if resp and resp.text:
+                            return resp.text
+                    except Exception as ex:
+                        last_exc = ex
+                if last_exc:
+                    raise last_exc
+                return None
+            finally:
+                # فایل آپلودشده روی سرور Gemini پاک شود (وگرنه تا ۴۸ ساعت می‌ماند)
+                try:
+                    gemini_client.files.delete(name=uploaded.name)
+                except Exception:
+                    pass
+
+        response_text = await asyncio.wait_for(asyncio.to_thread(_convert_upload_analyze), timeout=180)
+        if response_text:
+            await send_chunked(msg, message, f"🗣 <b>پاسخ دستیار صوتی:</b>\n\n{format_ai_text(response_text)}")
         else:
             await msg.edit_text("⚠️ متنی از فایل صوتی تشخیص داده نشد.")
     except Exception as e:
-        logging.error(f"Voice error: {type(e).__name__}")
-        await msg.edit_text(f"⚠️ خطا در پردازش فایل صوتی:\n<code>{str(e)[:200]}</code>", parse_mode="HTML")
+        logging.error(f"Voice error: {type(e).__name__}: {e}")
+        await msg.edit_text("⚠️ خطا در پردازش فایل صوتی. لطفاً دوباره تلاش کنید.")
     finally:
         for path in [ogg_filename, wav_filename]:
             try:
@@ -1321,28 +1671,24 @@ async def cancel_cmd(message: types.Message):
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     user_id = message.from_user.id
-    if await db_is_banned(user_id):
-        await message.answer("🚫 شما از استفاده از بات محروم شده‌اید.")
-        return
 
     user = await db_get_or_create_user(user_id)
     set_user_state(user_id, None)
 
-    args = message.text.split()
-    if len(args) > 1 and args[1].isdigit():
+    # فقط کاربر «کاملاً جدید» می‌تواند دعوت‌شده حساب شود؛
+    # قبلاً هر کاربر قدیمی هم با کلیک روی لینک دعوت، امتیاز به دعوت‌کننده می‌داد
+    args = (message.text or "").split()
+    if len(args) > 1 and args[1].isascii() and args[1].isdigit() and user.get("is_new"):
         referrer_id = int(args[1])
-        if referrer_id != user_id and user["referred_by"] is None:
+        if referrer_id != user_id:
             result = await db_add_referral(referrer_id, user_id)
             if result:
-                try:
-                    await bot.send_message(
-                        referrer_id,
-                        f"🎉 یکی از دوستانت با لینک تو اومد!\n"
-                        f"⭐ +{POINTS_PER_REFERRAL} امتیاز گرفتی.\n"
-                        f"👥 تعداد دعوت‌ها: {result['count']}"
-                    )
-                except Exception:
-                    pass
+                await safe_send(
+                    referrer_id,
+                    f"🎉 یکی از دوستانت با لینک تو اومد!\n"
+                    f"⭐ +{POINTS_PER_REFERRAL} امتیاز گرفتی.\n"
+                    f"👥 تعداد دعوت‌ها: {result['count']}"
+                )
 
     user = await db_get_or_create_user(user_id)
     status_text = "✨ VIP" if user["is_vip"] else "Standard 🔑"
@@ -1418,24 +1764,30 @@ async def crypto_news_handler(message: types.Message):
         await message.answer("⏱ لطفاً کمی صبر کنید.")
         return
     msg = await message.answer("🔄 در حال دریافت آخرین اخبار...")
+
+    # خلاصه‌ی اخبار بین همه‌ی کاربران ۱۰ دقیقه کش می‌شود (صرفه‌جویی در سهمیه‌ی Gemini)
+    cached = cache_get("news_summary")
+    if cached:
+        await send_chunked(msg, message, cached)
+        return
+
     raw_news = await fetch_crypto_news()
+    if not raw_news:
+        await msg.edit_text("⚠️ دریافت اخبار الان ممکن نیست. چند دقیقه بعد دوباره تلاش کنید.")
+        return
+
     prompt = (
         f"این اخبار کریپتو را تحلیلی و ساختاریافته خلاصه کن:\n{raw_news}\n\n"
         "⚠️ توضیحات و تحلیل را فارسی بنویس، اما نام ارزها و اصطلاحات (ETF, DeFi, Whale, Market Cap) را انگلیسی نگه دار."
     )
     try:
         response_text = await query_gemini(prompt)
-        chunks = chunk_text(f"📰 <b>خلاصه اخبار:</b>\n\n{response_text}")
-        try:
-            await msg.edit_text(chunks[0], parse_mode="HTML")
-            for c in chunks[1:]:
-                await message.answer(c, parse_mode="HTML")
-        except Exception:
-            await msg.edit_text(chunks[0])
-            for c in chunks[1:]:
-                await message.answer(c)
     except Exception:
-        await msg.edit_text(f"📰 خلاصه اخبار:\n\n{raw_news[:1000]}")
+        await msg.edit_text(f"📰 خلاصه اخبار (بدون تحلیل هوش مصنوعی):\n\n{raw_news[:1000]}")
+        return
+    body = f"📰 <b>خلاصه اخبار:</b>\n\n{format_ai_text(response_text)}"
+    cache_set("news_summary", body, 600)
+    await send_chunked(msg, message, body)
 
 
 # ============================================================
@@ -1444,7 +1796,17 @@ async def crypto_news_handler(message: types.Message):
 
 @dp.message(F.text == "🔔 هشدار قیمت")
 async def start_price_alert(message: types.Message):
-    set_user_state(message.from_user.id, "awaiting_alert_symbol")
+    user_id = message.from_user.id
+    alerts = await db_get_user_alerts(user_id)
+    if len(alerts) >= MAX_ALERTS_PER_USER:
+        await message.answer(
+            f"⚠️ حداکثر <b>{MAX_ALERTS_PER_USER}</b> هشدار فعال می‌توانید داشته باشید.\n"
+            f"ابتدا یکی از هشدارهای قبلی را حذف کنید:",
+            reply_markup=alert_success_keyboard(),
+            parse_mode="HTML"
+        )
+        return
+    set_user_state(user_id, "awaiting_alert_symbol")
     await message.answer("🔔 <b>تنظیم هشدار قیمت</b>\n\nلطفاً <b>نام ارز</b> را وارد کنید (مثال: BTC یا ETH):", parse_mode="HTML")
 
 
@@ -1455,18 +1817,45 @@ async def callback_new_alert(callback: types.CallbackQuery):
     await callback.message.answer("🔔 نام ارز را وارد کنید:")
 
 
+async def send_user_alerts(target_message: types.Message, user_id: int):
+    alerts = await db_get_user_alerts(user_id)
+    if not alerts:
+        await target_message.answer("📋 هیچ هشدار فعالی ندارید.")
+        return
+    text = "📋 <b>هشدارهای فعال شما:</b>\n\n"
+    rows = []
+    for i, a in enumerate(alerts, 1):
+        arrow = "📈" if a["condition"] == "above" else "📉"
+        text += f"{i}. {arrow} <b>{html.escape(a['symbol'])}</b> | هدف: <code>{fmt_price(a['target_price'])}</code>\n"
+        rows.append([InlineKeyboardButton(
+            text=f"🗑 حذف #{i} ({a['symbol']})", callback_data=f"alert_del:{a['id']}"
+        )])
+    await target_message.answer(
+        text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="HTML"
+    )
+
+
 @dp.callback_query(F.data == "my_alerts")
 async def callback_my_alerts(callback: types.CallbackQuery):
     await callback.answer()
-    user_id = callback.from_user.id
-    user_alerts = await db_get_user_alerts(user_id)
-    if not user_alerts:
-        await callback.message.answer("📋 هیچ هشدار فعالی ندارید.")
+    await send_user_alerts(callback.message, callback.from_user.id)
+
+
+@dp.callback_query(F.data.startswith("alert_del:"))
+async def callback_delete_alert(callback: types.CallbackQuery):
+    try:
+        alert_id = int(callback.data.split(":")[1])
+    except (IndexError, ValueError):
+        await callback.answer()
         return
-    text = "📋 <b>هشدارهای فعال شما:</b>\n\n"
-    for i, a in enumerate(user_alerts, 1):
-        text += f"{i}. <b>{a['symbol']}</b> | هدف: <code>{a['target_price']}</code>\n"
-    await callback.message.answer(text, parse_mode="HTML")
+    # فقط مالک هشدار می‌تواند آن را حذف کند
+    ok = await db_delete_alert(alert_id, callback.from_user.id)
+    await callback.answer("🗑 حذف شد" if ok else "این هشدار قبلاً حذف شده.")
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await send_user_alerts(callback.message, callback.from_user.id)
 
 
 # ============================================================
@@ -1500,9 +1889,12 @@ async def dex_radar_handler(message: types.Message):
         return
     msg = await message.answer("🔎 در حال رصد...")
     tokens = await fetch_dex_tokens()
+    if not tokens:
+        await msg.edit_text("⚠️ دریافت اطلاعات DEX الان ممکن نیست. چند دقیقه بعد دوباره تلاش کنید.")
+        return
     text = "🐳 <b>توکن‌های ترند DEX:</b>\n\n"
     for t in tokens:
-        text += f"🪙 <b>{t['symbol']}</b> | قیمت: <code>{t['price']}</code>\n"
+        text += f"🪙 <b>{html.escape(t['symbol'])}</b> | قیمت: <code>{t['price']}</code>\n"
     await msg.edit_text(text, parse_mode="HTML")
 
 
@@ -1510,19 +1902,40 @@ async def dex_radar_handler(message: types.Message):
 # ==================== شاخص ترس و طمع ======================
 # ============================================================
 
+FNG_FA = {
+    "Extreme Fear": "ترس شدید 😱",
+    "Fear": "ترس 😨",
+    "Neutral": "خنثی 😐",
+    "Greed": "طمع 🤑",
+    "Extreme Greed": "طمع شدید 🚀",
+}
+
+
 @dp.message(F.text == "📊 شاخص ترس و طمع")
 async def fear_and_greed(message: types.Message):
-    async with aiohttp.ClientSession() as session:
-        async with session.get("https://api.alternative.me/fng/") as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                item = data["data"][0]
-                await message.answer(
-                    f"📊 <b>شاخص ترس و طمع:</b>\n\n"
-                    f"🎯 عدد: <b>{item['value']}/100</b>\n"
-                    f"📌 وضعیت: <b>{item['value_classification']}</b>",
-                    parse_mode="HTML"
-                )
+    try:
+        cached = cache_get("fng")
+        if cached is None:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    "https://api.alternative.me/fng/", timeout=aiohttp.ClientTimeout(total=8)
+                ) as resp:
+                    if resp.status != 200:
+                        raise RuntimeError(f"status {resp.status}")
+                    data = await resp.json()
+                    cached = data["data"][0]
+                    cache_set("fng", cached, 300)
+        item = cached
+        label = FNG_FA.get(item["value_classification"], item["value_classification"])
+        await message.answer(
+            f"📊 <b>شاخص ترس و طمع:</b>\n\n"
+            f"🎯 عدد: <b>{item['value']}/100</b>\n"
+            f"📌 وضعیت: <b>{label}</b>",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logging.error(f"FNG error: {type(e).__name__}: {e}")
+        await message.answer("⚠️ دریافت شاخص ترس و طمع الان ممکن نیست. بعداً دوباره تلاش کنید.")
 
 
 # ============================================================
@@ -1582,7 +1995,7 @@ async def my_points(message: types.Message):
     text = (
         f"⭐ <b>امتیاز شما: {points}</b>\n\n"
         f"📊 راه‌های کسب امتیاز:\n"
-        f"• هر تحلیل ارز: <b>+{POINTS_PER_ANALYSIS}</b>\n"
+        f"• هر تحلیل ارز: <b>+{POINTS_PER_ANALYSIS}</b> (حداکثر {MAX_ANALYSIS_POINTS_PER_DAY} امتیاز در روز)\n"
         f"• هر دعوت موفق: <b>+{POINTS_PER_REFERRAL}</b>\n\n"
         f"🎁 <b>{POINTS_FOR_VIP} امتیاز = {FREE_VIP_DAYS} روز VIP رایگان</b>\n"
     )
@@ -1612,6 +2025,9 @@ async def buy_vip_handler(message: types.Message):
             parse_mode="HTML"
         )
         return
+    # مهم: قبلاً این هندلر state را ست نمی‌کرد و ارسال فیش بعدش با
+    # «اول دکمه خرید VIP را بزن» رد می‌شد (فقط دکمه‌ی اینلاین state را ست می‌کرد)
+    set_user_state(user_id, "awaiting_payment_receipt")
     await message.answer(
         f"💎 <b>خرید VIP</b>\n"
         f"────────────────\n\n"
@@ -1716,9 +2132,6 @@ async def discount_code_handler(message: types.Message):
 @dp.message(F.photo)
 async def handle_payment_photo(message: types.Message):
     user_id = message.from_user.id
-    if await db_is_banned(user_id):
-        await message.answer("🚫 شما محروم شده‌اید.")
-        return
 
     check_state_timeout(user_id)
     state = user_cache.get(user_id, {}).get("state")
@@ -1729,12 +2142,18 @@ async def handle_payment_photo(message: types.Message):
         )
         return
 
+    if await db_user_has_pending_payment(user_id):
+        set_user_state(user_id, None)
+        await message.answer("⏳ درخواست قبلی شما هنوز در انتظار بررسی است. لطفاً کمی صبر کنید.")
+        return
+
     file_id = message.photo[-1].file_id
     req_id = await db_create_payment_request(user_id, PAYMENT_AMOUNT, file_id)
     set_user_state(user_id, None)
 
-    username = message.from_user.username or "—"
-    full_name = message.from_user.full_name or "—"
+    # نام و یوزرنیم ورودی کاربر است؛ بدون escape، کاراکتری مثل & یا < پیام ادمین را خراب می‌کرد
+    username = html.escape(message.from_user.username or "—")
+    full_name = html.escape(message.from_user.full_name or "—")
 
     admin_text = (
         f"🔔 <b>درخواست VIP جدید</b>\n"
@@ -1744,7 +2163,7 @@ async def handle_payment_photo(message: types.Message):
         f"📛 یوزرنیم: @{username}\n"
         f"💰 مبلغ: <b>{VIP_PRICE_TOMAN} تومان</b>\n"
         f"📅 مدت: <b>{VIP_DURATION_DAYS} روز</b>\n"
-        f"🕐 زمان: <code>{datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}</code>\n\n"
+        f"🕐 زمان: <code>{datetime.datetime.now(BOT_TZ).strftime('%Y-%m-%d %H:%M')}</code>\n\n"
         f"🔖 شماره: <code>#{req_id}</code>"
     )
 
@@ -1780,59 +2199,64 @@ async def payment_callbacks(callback: types.CallbackQuery):
         return
 
     parts = callback.data.split(":")
-    action = parts[1]
-    req_id = int(parts[2])
-    await callback.answer()
-
-    req = await db_get_payment_request(req_id)
-    if not req:
-        await callback.message.answer("❌ درخواست پیدا نشد.")
+    try:
+        action = parts[1]
+        req_id = int(parts[2])
+    except (IndexError, ValueError):
+        await callback.answer()
         return
 
+    # هر callback فقط یک بار answer می‌شود (بار دوم توسط تلگرام رد می‌شود)
+    if action == "later":
+        await callback.answer("⏸ بعداً بررسی می‌کنی.", show_alert=True)
+        return
+    if action not in ("approve", "reject"):
+        await callback.answer()
+        return
+
+    # تغییر وضعیت اتمیک: اگر ادمین دوبار روی «تأیید» بزند، VIP دوبار تمدید نمی‌شود
+    new_status = "approved" if action == "approve" else "rejected"
+    req = await db_resolve_payment(req_id, new_status)
+    if not req:
+        await callback.answer("⚠️ این درخواست قبلاً بررسی شده یا وجود ندارد.", show_alert=True)
+        return
+    await callback.answer("✅ انجام شد")
     target_uid = req["user_id"]
 
     if action == "approve":
-        until = await db_extend_vip(target_uid, VIP_DURATION_DAYS)
-        await db_update_payment_request(req_id, "approved")
+        try:
+            until = await db_extend_vip(target_uid, VIP_DURATION_DAYS)
+        except Exception as e:
+            logging.error(f"Extend VIP failed: {type(e).__name__}: {e}")
+            await db_update_payment_request(req_id, "pending")  # برگردان تا دوباره قابل تلاش باشد
+            await callback.message.answer("❌ خطا در فعال‌سازی VIP؛ دوباره تأیید را بزنید.")
+            return
         await db_log_admin(user_id, f"Approved payment #{req_id} for {target_uid}")
-        try:
-            await bot.send_message(
-                target_uid,
-                f"🎉 <b>تبریک! VIP فعال شد!</b>\n\n"
-                f"📅 مدت: <b>{VIP_DURATION_DAYS} روز</b>\n"
-                f"🗓 اعتبار تا: <code>{until.strftime('%Y-%m-%d')}</code>\n"
-                f"🔖 درخواست: <code>#{req_id}</code>",
-                parse_mode="HTML"
-            )
-        except Exception:
-            pass
-        try:
-            new_cap = (callback.message.caption or "") + "\n\n✅ تأیید شد"
-            await callback.message.edit_caption(caption=new_cap)
-        except Exception:
-            pass
-
-    elif action == "reject":
-        await db_update_payment_request(req_id, "rejected")
+        await safe_send(
+            target_uid,
+            f"🎉 <b>تبریک! VIP فعال شد!</b>\n\n"
+            f"📅 مدت: <b>{VIP_DURATION_DAYS} روز</b>\n"
+            f"🗓 اعتبار تا: <code>{until.strftime('%Y-%m-%d')}</code>\n"
+            f"🔖 درخواست: <code>#{req_id}</code>",
+            parse_mode="HTML"
+        )
+        suffix = "\n\n✅ تأیید شد"
+    else:
         await db_log_admin(user_id, f"Rejected payment #{req_id} for {target_uid}")
-        try:
-            await bot.send_message(
-                target_uid,
-                f"❌ <b>درخواست VIP شما رد شد.</b>\n\n"
-                f"🔖 درخواست: <code>#{req_id}</code>\n"
-                f"💡 در صورت اشتباه، با پشتیبانی تماس بگیرید.",
-                parse_mode="HTML"
-            )
-        except Exception:
-            pass
-        try:
-            new_cap = (callback.message.caption or "") + "\n\n❌ رد شد"
-            await callback.message.edit_caption(caption=new_cap)
-        except Exception:
-            pass
+        await safe_send(
+            target_uid,
+            f"❌ <b>درخواست VIP شما رد شد.</b>\n\n"
+            f"🔖 درخواست: <code>#{req_id}</code>\n"
+            f"💡 در صورت اشتباه، با پشتیبانی تماس بگیرید.",
+            parse_mode="HTML"
+        )
+        suffix = "\n\n❌ رد شد"
 
-    elif action == "later":
-        await callback.answer("⏸ بعداً بررسی می‌کنی.", show_alert=True)
+    try:
+        await callback.message.edit_caption(caption=(callback.message.caption or "") + suffix)
+    except Exception:
+        pass
+
 
 # ============================================================
 # ==================== پنل ادمین ============================
@@ -1875,7 +2299,9 @@ async def admin_callbacks(callback: types.CallbackQuery):
 
     data = callback.data.split(":")
     action = data[1] if len(data) > 1 else "back"
-    await callback.answer()
+    # اکشن‌هایی که خودشان یک alert نشان می‌دهند نباید قبلش answer بخورند
+    if action not in ("setvip", "unvip", "ban", "unban"):
+        await callback.answer()
 
     if action == "back":
         try:
@@ -1896,10 +2322,9 @@ async def admin_callbacks(callback: types.CallbackQuery):
         c = await db_count_users()
         alerts = await db_get_all_alerts()
         payments = await db_get_pending_payments()
-        settings = await db_get_settings()
-        pump = "🟢" if settings.get("pump_detector_enabled") else "🔴"
-        digest = "🟢" if settings.get("daily_digest_enabled") else "🔴"
-        channel = "🟢" if settings.get("channel_broadcast_enabled", True) else "🔴"
+        pump = "🟢" if SYSTEM_SETTINGS.get("pump_detector_enabled") else "🔴"
+        digest = "🟢" if SYSTEM_SETTINGS.get("daily_digest_enabled") else "🔴"
+        channel = "🟢" if SYSTEM_SETTINGS.get("channel_broadcast_enabled", True) else "🔴"
         text = (
             f"📊 <b>آمار کلی بات</b>\n\n"
             f"👥 کل کاربران: <b>{c['total']}</b>\n"
@@ -1940,7 +2365,8 @@ async def admin_callbacks(callback: types.CallbackQuery):
                 vip_tag = "💎" if u["is_vip"] else "🆓"
                 ban_tag = "🚫" if u["user_id"] in banned_list else ""
                 text += f"{vip_tag}{ban_tag} <code>{u['user_id']}</code> ⭐{u.get('points', 0) or 0}\n"
-            text += f"\n👥 کل: <b>{len(users)}</b>"
+            total = (await db_count_users())["total"]
+            text += f"\n👥 نمایش {len(users)} از <b>{total}</b> کاربر"
         await db_log_admin(user_id, "Viewed users list")
         try:
             await callback.message.edit_text(text, reply_markup=admin_back_keyboard(), parse_mode="HTML")
@@ -1978,12 +2404,16 @@ async def admin_callbacks(callback: types.CallbackQuery):
         return
 
     if action == "user_search":
-        admin_state[user_id] = {"action": "awaiting_user_search"}
+        admin_state[user_id] = {"action": "awaiting_user_search", "ts": time.time()}
         await callback.message.answer("🔍 <b>جستجو</b>\n\nآیدی عددی کاربر:", parse_mode="HTML")
         return
 
     if action in ("setvip", "unvip", "ban", "unban") and len(data) >= 3:
-        target_uid = int(data[2])
+        try:
+            target_uid = int(data[2])
+        except ValueError:
+            await callback.answer()
+            return
         if action == "setvip":
             await db_extend_vip(target_uid, VIP_DURATION_DAYS)
             await db_log_admin(user_id, f"Set VIP for {target_uid}")
@@ -2084,7 +2514,7 @@ async def admin_callbacks(callback: types.CallbackQuery):
 
     if action in ("bcast_all", "bcast_vip", "bcast_free"):
         target = {"bcast_all": "همه", "bcast_vip": "فقط VIP", "bcast_free": "فقط غیر VIP"}[action]
-        admin_state[user_id] = {"action": "awaiting_broadcast", "target": action}
+        admin_state[user_id] = {"action": "awaiting_broadcast", "target": action, "ts": time.time()}
         await callback.message.answer(f"📢 مخاطب: <b>{target}</b>\n\nمتن پیام:", parse_mode="HTML")
         return
 
@@ -2136,7 +2566,7 @@ async def admin_callbacks(callback: types.CallbackQuery):
             text = "📋 <b>آخرین ۲۰ لاگ:</b>\n\n"
             for l in logs:
                 ts = l["created_at"].strftime("%m-%d %H:%M") if l["created_at"] else "?"
-                text += f"<code>[{ts}]</code> {l['action'][:80]}\n"
+                text += f"<code>[{ts}]</code> {html.escape(l['action'][:80])}\n"
         try:
             await callback.message.edit_text(text, reply_markup=admin_back_keyboard(), parse_mode="HTML")
         except Exception:
@@ -2152,8 +2582,7 @@ async def admin_callbacks(callback: types.CallbackQuery):
         return
 
     if action == "toggle_pump":
-        settings = await db_get_settings()
-        new_val = not settings.get("pump_detector_enabled", True)
+        new_val = not SYSTEM_SETTINGS.get("pump_detector_enabled", True)
         await db_set_setting("pump_detector_enabled", new_val)
         SYSTEM_SETTINGS["pump_detector_enabled"] = new_val
         txt = "روشن" if new_val else "خاموش"
@@ -2166,8 +2595,7 @@ async def admin_callbacks(callback: types.CallbackQuery):
         return
 
     if action == "toggle_digest":
-        settings = await db_get_settings()
-        new_val = not settings.get("daily_digest_enabled", True)
+        new_val = not SYSTEM_SETTINGS.get("daily_digest_enabled", True)
         await db_set_setting("daily_digest_enabled", new_val)
         SYSTEM_SETTINGS["daily_digest_enabled"] = new_val
         txt = "روشن" if new_val else "خاموش"
@@ -2180,8 +2608,7 @@ async def admin_callbacks(callback: types.CallbackQuery):
         return
 
     if action == "toggle_channel":
-        settings = await db_get_settings()
-        new_val = not settings.get("channel_broadcast_enabled", True)
+        new_val = not SYSTEM_SETTINGS.get("channel_broadcast_enabled", True)
         await db_set_setting("channel_broadcast_enabled", new_val)
         SYSTEM_SETTINGS["channel_broadcast_enabled"] = new_val
         txt = "روشن" if new_val else "خاموش"
@@ -2201,20 +2628,25 @@ async def admin_callbacks(callback: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("tf:"))
 async def handle_timeframe_click(callback: types.CallbackQuery):
     user_id = callback.from_user.id
+
+    # callback_data از سمت کلاینت قابل جعل است؛ همیشه اعتبارسنجی می‌کنیم
+    parts = callback.data.split(":")
+    if len(parts) != 3 or parts[2] not in VALID_TIMEFRAMES or not normalize_symbol(parts[1]):
+        await callback.answer("⚠️ درخواست نامعتبر.", show_alert=True)
+        return
     await callback.answer()
 
-    if await db_is_banned(user_id):
-        await callback.message.answer("🚫 محروم هستید.")
-        return
     if not check_rate_limit(user_id):
         await callback.message.answer("⏱ کمی صبر کن. حداکثر ۵ درخواست در دقیقه.")
         return
 
-    _, symbol, tf = callback.data.split(":")
-    loading_msg = await callback.message.answer(f"🔄 در حال پردازش <b>{symbol}</b>...", parse_mode="HTML")
+    symbol, tf = parts[1], parts[2]
+    loading_msg = await callback.message.answer(
+        f"🔄 در حال پردازش <b>{html.escape(symbol)}</b>...", parse_mode="HTML"
+    )
 
     try:
-        signal_text, chart_bytes = await generate_signal(symbol, tf)
+        signal_text, chart_bytes, ok = await generate_signal(symbol, tf)
         try:
             await loading_msg.delete()
         except Exception:
@@ -2222,12 +2654,9 @@ async def handle_timeframe_click(callback: types.CallbackQuery):
 
         if chart_bytes:
             photo_file = BufferedInputFile(chart_bytes, filename=f"{symbol}.png")
+            caption = f"📊 <b>چارت {html.escape(symbol)} ({tf})</b>"
             try:
-                await callback.message.answer_photo(
-                    photo=photo_file,
-                    caption=f"📊 <b>چارت {symbol} ({tf})</b>",
-                    parse_mode="HTML"
-                )
+                await callback.message.answer_photo(photo=photo_file, caption=caption, parse_mode="HTML")
             except Exception:
                 await callback.message.answer_photo(photo=photo_file, caption=f"📊 چارت {symbol} ({tf})")
 
@@ -2238,15 +2667,16 @@ async def handle_timeframe_click(callback: types.CallbackQuery):
                 except Exception:
                     await callback.message.answer(c)
 
-        if not is_admin(user_id):
+        # امتیاز فقط برای تحلیل موفق (قبلاً با ارز نامعتبر هم امتیاز داده می‌شد) و با سقف روزانه
+        if ok and not is_admin(user_id):
             try:
-                await db_add_points(user_id, POINTS_PER_ANALYSIS)
-            except Exception:
-                pass
+                await db_add_analysis_points(user_id)
+            except Exception as e:
+                logging.warning(f"add points failed: {type(e).__name__}")
 
     except Exception as e:
         logging.error(f"TF Error: {type(e).__name__}: {e}")
-        await callback.message.answer(f"⚠️ خطا:\n<code>{str(e)[:200]}</code>", parse_mode="HTML")
+        await callback.message.answer("⚠️ خطایی رخ داد. لطفاً دوباره تلاش کنید.")
 
 
 # ============================================================
@@ -2256,24 +2686,21 @@ async def handle_timeframe_click(callback: types.CallbackQuery):
 @dp.message(F.text)
 async def handle_text_input(message: types.Message):
     user_id = message.from_user.id
-    if await db_is_banned(user_id):
-        await message.answer("🚫 محروم هستید.")
-        return
-
     text = message.text.strip()
 
+    # ---------- stateهای ادمین ----------
     if is_admin(user_id) and user_id in admin_state:
         st = admin_state[user_id]
-
-        if st.get("action") == "awaiting_user_search":
+        if time.time() - st.get("ts", time.time()) > STATE_TIMEOUT_SECONDS:
+            admin_state.pop(user_id, None)  # state قدیمی ادمین، ورودی بعدی را نبلعد
+        elif st.get("action") == "awaiting_user_search":
             admin_state.pop(user_id, None)
-            if not text.isdigit():
+            if not (text.isascii() and text.isdigit()):
                 await message.answer("⚠️ آیدی عددی وارد کن.")
                 return
             target_uid = int(text)
-            try:
-                user = await db_get_or_create_user(target_uid)
-            except Exception:
+            user = await db_get_user(target_uid)  # فقط می‌خواند؛ کاربر جدید نمی‌سازد
+            if not user:
                 await message.answer("❌ کاربر پیدا نشد.")
                 return
             banned = await db_is_banned(target_uid)
@@ -2292,108 +2719,148 @@ async def handle_text_input(message: types.Message):
                 parse_mode="HTML"
             )
             return
-
-        if st.get("action") == "awaiting_broadcast":
+        elif st.get("action") == "awaiting_broadcast":
             admin_state.pop(user_id, None)
             target = st.get("target")
-            users = await db_get_all_users(limit=10000)
-            count = 0
-            for u in users:
-                if target == "bcast_vip" and not u["is_vip"]:
-                    continue
-                if target == "bcast_free" and u["is_vip"]:
-                    continue
-                try:
-                    await bot.send_message(u["user_id"], f"📢 <b>پیام از ادمین:</b>\n\n{text}", parse_mode="HTML")
-                    count += 1
-                    await asyncio.sleep(0.05)
-                except Exception:
-                    pass
-            await db_log_admin(user_id, f"Broadcast to {target} ({count} users)")
-            await message.answer(f"✅ پیام به <b>{count}</b> کاربر ارسال شد.", parse_mode="HTML")
+            kind = {"bcast_all": "all", "bcast_vip": "vip", "bcast_free": "free"}.get(target, "all")
+            ids = await db_get_broadcast_ids(kind)  # کاربران بن‌شده و VIP منقضی‌شده لحاظ می‌شوند
+            body = f"📢 <b>پیام از ادمین:</b>\n\n{html.escape(text)}"
+            await message.answer(f"⏳ ارسال به <b>{len(ids)}</b> کاربر شروع شد...", parse_mode="HTML")
+
+            async def _run_broadcast():
+                count = await broadcast_to(ids, body)
+                await db_log_admin(user_id, f"Broadcast to {target} ({count}/{len(ids)} users)")
+                await safe_send(
+                    user_id, f"✅ پیام به <b>{count}</b> از {len(ids)} کاربر ارسال شد.", parse_mode="HTML"
+                )
+
+            spawn(_run_broadcast())
             return
 
+    # ---------- stateهای کاربر ----------
     check_state_timeout(user_id)
-    st_data = user_cache.get(user_id, {})
+    st_data = user_cache.setdefault(user_id, {})
     state = st_data.get("state")
 
     if state == "awaiting_alert_symbol":
-        formatted = text.upper()
-        if not formatted.endswith("/USDT"):
-            formatted += "/USDT"
-        st_data["alert_temp"] = {"symbol": formatted}
+        symbol = normalize_symbol(text)
+        if not symbol:
+            await message.answer("⚠️ نام ارز نامعتبر است. فقط نماد را بفرستید (مثال: BTC یا ETH):")
+            return
+        price = await get_ticker_price(symbol)
+        if price <= 0:
+            await message.answer(
+                f"⚠️ ارز <b>{html.escape(symbol)}</b> روی صرافی پیدا نشد. نماد دیگری بفرستید:",
+                parse_mode="HTML"
+            )
+            return
+        st_data["alert_temp"] = {"symbol": symbol}
         set_user_state(user_id, "awaiting_alert_price")
-        await message.answer(f"قیمت مد نظر برای <b>{formatted}</b> (دلار):", parse_mode="HTML")
+        await message.answer(
+            f"💵 قیمت فعلی <b>{symbol}</b>: <code>{fmt_price(price)}</code>\n\n"
+            f"قیمت هدف را (به دلار) وارد کنید:",
+            parse_mode="HTML"
+        )
         return
 
     elif state == "awaiting_alert_price":
-        try:
-            target_p = float(text)
-            symbol = st_data.get("alert_temp", {}).get("symbol", "")
-            current_p = await get_ticker_price(symbol)
-            if current_p == 0:
-                await message.answer("⚠️ قیمت فعلی دریافت نشد. دوباره امتحان کن.")
-                return
-            condition = "above" if target_p > current_p else "below"
-            await db_add_alert(user_id, symbol, target_p, condition)
+        target_p = parse_number(text)
+        if target_p is None or target_p <= 0:
+            await message.answer("⚠️ قیمت نامعتبر است. یک عدد مثبت وارد کنید (مثلاً 65000).")
+            return
+        symbol = st_data.get("alert_temp", {}).get("symbol")
+        if not symbol:
+            set_user_state(user_id, None)
+            await message.answer("⏱ زمان این عملیات تمام شده؛ دوباره از 🔔 هشدار قیمت شروع کنید.")
+            return
+        current_p = await get_ticker_price(symbol)
+        if current_p <= 0:
+            await message.answer("⚠️ قیمت فعلی دریافت نشد. دوباره امتحان کن.")
+            return
+        alerts = await db_get_user_alerts(user_id)
+        if len(alerts) >= MAX_ALERTS_PER_USER:
             set_user_state(user_id, None)
             await message.answer(
-                f"✅ <b>هشدار ثبت شد!</b>\n{symbol} | هدف: <code>{target_p}</code>",
-                reply_markup=alert_success_keyboard(),
-                parse_mode="HTML"
+                f"⚠️ به سقف {MAX_ALERTS_PER_USER} هشدار رسیده‌اید. یکی را حذف کنید.",
+                reply_markup=alert_success_keyboard()
             )
-        except Exception:
-            await message.answer("⚠️ قیمت نامعتبر است.")
+            return
+        condition = "above" if target_p > current_p else "below"
+        await db_add_alert(user_id, symbol, target_p, condition)
+        set_user_state(user_id, None)
+        await message.answer(
+            f"✅ <b>هشدار ثبت شد!</b>\n{symbol} | هدف: <code>{fmt_price(target_p)}</code>",
+            reply_markup=alert_success_keyboard(),
+            parse_mode="HTML"
+        )
         return
 
     elif state == "awaiting_capital":
-        try:
-            st_data["risk_calc_data"] = {"capital": float(text)}
-            set_user_state(user_id, "awaiting_risk_pct")
-            await message.answer("درصد ریسک (مثلاً 1 یا 2):")
-        except ValueError:
-            await message.answer("لطفاً عدد وارد کن.")
+        value = parse_number(text)
+        if value is None or value <= 0:
+            await message.answer("لطفاً یک عدد مثبت وارد کن.")
+            return
+        st_data["risk_calc_data"] = {"capital": value}
+        set_user_state(user_id, "awaiting_risk_pct")
+        await message.answer("درصد ریسک (مثلاً 1 یا 2):")
         return
 
     elif state == "awaiting_risk_pct":
-        try:
-            st_data["risk_calc_data"]["risk_pct"] = float(text)
-            set_user_state(user_id, "awaiting_entry")
-            await message.answer("قیمت ورود (Entry):")
-        except ValueError:
-            await message.answer("لطفاً عدد وارد کن.")
+        value = parse_number(text)
+        if value is None or not (0 < value <= 100):
+            await message.answer("لطفاً عددی بین 0 تا 100 وارد کن (مثلاً 1 یا 2).")
+            return
+        st_data.setdefault("risk_calc_data", {})["risk_pct"] = value
+        set_user_state(user_id, "awaiting_entry")
+        await message.answer("قیمت ورود (Entry):")
         return
 
     elif state == "awaiting_entry":
-        try:
-            st_data["risk_calc_data"]["entry"] = float(text)
-            set_user_state(user_id, "awaiting_sl")
-            await message.answer("قیمت حد ضرر (Stop Loss):")
-        except ValueError:
-            await message.answer("لطفاً عدد وارد کن.")
+        value = parse_number(text)
+        if value is None or value <= 0:
+            await message.answer("لطفاً یک قیمت مثبت وارد کن.")
+            return
+        st_data.setdefault("risk_calc_data", {})["entry"] = value
+        set_user_state(user_id, "awaiting_sl")
+        await message.answer("قیمت حد ضرر (Stop Loss):")
         return
 
     elif state == "awaiting_sl":
-        try:
-            sl = float(text)
-            d = st_data.get("risk_calc_data", {})
-            capital, risk_pct, entry = d["capital"], d["risk_pct"], d["entry"]
+        sl = parse_number(text)
+        d = st_data.get("risk_calc_data") or {}
+        if not all(k in d for k in ("capital", "risk_pct", "entry")):
             set_user_state(user_id, None)
-            risk_amount = capital * (risk_pct / 100)
-            sl_distance_pct = abs(entry - sl) / entry
-            position_size = risk_amount / sl_distance_pct
-            await message.answer(
-                f"🧮 <b>نتیجه مدیریت ریسک:</b>\n\n"
-                f"💵 کل سرمایه: <code>{capital:,.2f}</code>\n"
-                f"🎯 ریسک: <code>{risk_amount:,.2f}</code> ({risk_pct}%)\n"
-                f"✅ <b>حجم پیشنهادی:</b> <code>{position_size:,.2f}</code>",
-                parse_mode="HTML"
-            )
-        except Exception:
-            await message.answer("لطفاً عدد وارد کن.")
+            await message.answer("⏱ اطلاعات قبلی از بین رفته؛ دوباره از 🧮 محاسبه ریسک شروع کن.")
+            return
+        capital, risk_pct, entry = d["capital"], d["risk_pct"], d["entry"]
+        if sl is None or sl <= 0:
+            await message.answer("لطفاً یک قیمت مثبت وارد کن.")
+            return
+        if sl == entry:
+            await message.answer("⚠️ حد ضرر نمی‌تواند برابر قیمت ورود باشد. عدد دیگری وارد کن.")
+            return
+        set_user_state(user_id, None)
+        risk_amount = capital * (risk_pct / 100)
+        sl_distance_pct = abs(entry - sl) / entry
+        position_size = risk_amount / sl_distance_pct
+        leverage_needed = position_size / capital
+        side = "Long 🟢" if sl < entry else "Short 🔴"
+        await message.answer(
+            f"🧮 <b>نتیجه مدیریت ریسک:</b>\n\n"
+            f"💵 کل سرمایه: <code>{capital:,.2f}</code>\n"
+            f"🎯 ریسک: <code>{risk_amount:,.2f}</code> ({risk_pct}%)\n"
+            f"📐 جهت (بر اساس SL): <b>{side}</b>\n"
+            f"📏 فاصله SL تا Entry: <code>{sl_distance_pct * 100:.2f}%</code>\n"
+            f"✅ <b>حجم پیشنهادی:</b> <code>{position_size:,.2f}</code>\n"
+            f"⚖️ اهرم لازم: <code>{leverage_needed:.2f}x</code>",
+            parse_mode="HTML"
+        )
         return
 
     elif state == "awaiting_discount_code":
+        if not check_rate_limit(user_id):  # جلوگیری از حدس زدن کد
+            await message.answer("⏱ لطفاً کمی صبر کنید.")
+            return
         code = text.strip().upper()
         set_user_state(user_id, None)
         result = await db_redeem_code(code, user_id)
@@ -2409,22 +2876,41 @@ async def handle_text_input(message: types.Message):
             await message.answer(f"❌ {result['msg']}")
         return
 
-    menu_buttons = [
-        "🚀 اسکنر ارزهای پامپی", "🐳 رادار توکن‌های جدید (DEX)",
-        "📊 شاخص ترس و طمع", "🧮 محاسبه ریسک", "👤 حساب کاربری",
-        "🔔 هشدار قیمت", "📰 اخبار و تحلیل احساسات", "👥 سیستم دعوت و هدیه",
-        "⚙️ پنل ادمین", "💎 خرید VIP", "🎁 کد اشتراک", "⭐ امتیاز من",
-        "📢 کانال ما"
-    ]
-    symbol_text = text.upper()
-    if symbol_text.startswith("/") or symbol_text in menu_buttons:
+    # ---------- هر متن دیگری: تلاش برای تشخیص نماد ارز ----------
+    if text.startswith("/"):
         return
 
+    symbol = normalize_symbol(text)
+    if not symbol:
+        if state == "awaiting_payment_receipt":
+            await message.answer("📸 لطفاً <b>عکس فیش واریزی</b> را ارسال کنید (برای لغو: /cancel).", parse_mode="HTML")
+        else:
+            await message.answer(
+                "🤔 نماد نامعتبر است. فقط نام ارز را بفرستید (مثل <code>BTC</code> یا <code>SOL</code>) یا از منوی پایین استفاده کنید.",
+                parse_mode="HTML"
+            )
+        return
+
+    base = symbol.split("/")[0]  # در callback_data فقط BTC می‌رود تا از حد ۶۴ بایت دور بمانیم
     await message.answer(
-        f"⏱ تایم‌فریم <b>{symbol_text}</b>:",
-        reply_markup=timeframe_keyboard(symbol_text),
+        f"⏱ تایم‌فریم <b>{base}</b>:",
+        reply_markup=timeframe_keyboard(base),
         parse_mode="HTML"
     )
+
+
+# ============================================================
+# ================ هندلر خطای سراسری ========================
+# ============================================================
+
+@dp.errors()
+async def global_error_handler(event: ErrorEvent):
+    exc = event.exception
+    # «message is not modified» یعنی کاربر دوبار روی یک دکمه زده؛ خطا نیست
+    if isinstance(exc, TelegramBadRequest) and "message is not modified" in str(exc):
+        return True
+    logging.error(f"Unhandled handler error: {type(exc).__name__}: {exc}")
+    return True
 
 
 # ============================================================
@@ -2438,57 +2924,52 @@ async def pump_dump_detector_loop():
     while True:
         try:
             await asyncio.sleep(60)
-            settings = await db_get_settings()
-            if not settings.get("pump_detector_enabled", True):
+            if not SYSTEM_SETTINGS.get("pump_detector_enabled", True):
                 continue
-            now_ts = datetime.datetime.now().timestamp()
-            exchange = ccxt.coinex()
-            try:
-                for symbol in tracked:
-                    try:
-                        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=21)
-                        if len(ohlcv) < 21: continue
-                        df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
-                        last = df.iloc[-1]
-                        prev = df.iloc[:-1]
-                        avg_vol = prev['Volume'].mean()
-                        cur_vol = last['Volume']
-                        pct = ((last['Close'] - last['Open']) / last['Open']) * 100
-                        spike = (cur_vol >= avg_vol * 4) and (avg_vol > 0)
-                        alert_type = None
-                        if spike and pct >= 1.2:
-                            alert_type = "🚀 پامپ احتمالی (Pump Alert)"
-                        elif spike and pct <= -1.2:
-                            alert_type = "🩸 دامپ احتمالی (Dump Alert)"
-                        if alert_type:
-                            if symbol in last_alerts and (now_ts - last_alerts[symbol]) < 600:
-                                continue
-                            last_alerts[symbol] = now_ts
-                            clean = symbol.replace('/', '')
-                            alert_msg = (
-                                f"🚨 <b>هشدار رادار بازار!</b>\n\n"
-                                f"🪙 <b>{clean}</b>\n"
-                                f"📊 {alert_type}\n"
-                                f"📈 <code>{pct:+.2f}%</code>\n"
-                                f"⚡️ <code>{cur_vol/avg_vol:.1f}X</code>\n"
-                                f"💵 <code>{last['Close']}</code>"
-                            )
-                            users = await db_get_all_users(limit=10000)
-                            for u in users:
-                                if u["is_vip"]:
-                                    try:
-                                        await bot.send_message(u["user_id"], alert_msg, parse_mode="HTML")
-                                        await asyncio.sleep(0.05)
-                                    except Exception:
-                                        pass
-                            await send_to_channel(alert_msg)
-                    except Exception as e:
-                        logging.error(f"Pump {symbol}: {e}")
-            finally:
+            exchange = get_exchange()
+            for symbol in tracked:
                 try:
-                    await exchange.close()
-                except Exception:
-                    pass
+                    ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=21)
+                    if len(ohlcv) < 21:
+                        continue
+                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+                    last = df.iloc[-1]
+                    prev = df.iloc[:-1]
+                    avg_vol = prev['Volume'].mean()
+                    cur_vol = last['Volume']
+                    if not last['Open']:
+                        continue
+                    pct = ((last['Close'] - last['Open']) / last['Open']) * 100
+                    spike = (cur_vol >= avg_vol * 4) and (avg_vol > 0)
+                    alert_type = None
+                    if spike and pct >= 1.2:
+                        alert_type = "🚀 پامپ احتمالی (Pump Alert)"
+                    elif spike and pct <= -1.2:
+                        alert_type = "🩸 دامپ احتمالی (Dump Alert)"
+                    if not alert_type:
+                        continue
+                    if time.time() - last_alerts.get(symbol, 0) < 600:
+                        continue
+                    last_alerts[symbol] = time.time()
+
+                    clean = symbol.replace('/', '')
+                    alert_msg = (
+                        f"🚨 <b>هشدار رادار بازار!</b>\n\n"
+                        f"🪙 <b>{clean}</b>\n"
+                        f"📊 {alert_type}\n"
+                        f"📈 <code>{pct:+.2f}%</code>\n"
+                        f"⚡️ <code>{cur_vol / avg_vol:.1f}X</code>\n"
+                        f"💵 <code>{fmt_price(last['Close'])}</code>"
+                    )
+                    # فقط VIPهای «فعال» (نه منقضی‌شده‌ها) و بدون بن‌شده‌ها
+                    vip_ids = await db_get_broadcast_ids("vip")
+                    if ADMIN_ID and ADMIN_ID not in vip_ids:
+                        vip_ids.append(ADMIN_ID)
+                    # ارسال در پس‌زمینه؛ حلقه‌ی تشخیص برای هزاران ارسال متوقف نمی‌ماند
+                    spawn(broadcast_to(vip_ids, alert_msg))
+                    await send_to_channel(alert_msg)
+                except Exception as e:
+                    logging.error(f"Pump {symbol}: {type(e).__name__}: {e}")
         except Exception as e:
             logging.error(f"Pump loop: {type(e).__name__}: {e}")
 
@@ -2501,28 +2982,39 @@ async def generate_daily_digest():
     fng_val, fng_class = "N/A", "N/A"
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get("https://api.alternative.me/fng/") as resp:
+            async with session.get(
+                "https://api.alternative.me/fng/", timeout=aiohttp.ClientTimeout(total=8)
+            ) as resp:
                 if resp.status == 200:
                     d = await resp.json()
                     fng_val = d["data"][0]["value"]
-                    fng_class = d["data"][0]["value_classification"]
+                    fng_class = FNG_FA.get(d["data"][0]["value_classification"],
+                                           d["data"][0]["value_classification"])
     except Exception:
         pass
+
     _, df_btc = await get_crypto_dataframe("BTC/USDT", "1d", 30)
-    btc_price = df_btc['Close'].iloc[-1] if df_btc is not None else 0
-    btc_change = df_btc['Close'].pct_change().iloc[-1] * 100 if df_btc is not None else 0
+    if df_btc is not None:
+        btc_line = (f"🪙 <b>BTC:</b> <code>{df_btc['Close'].iloc[-1]:,.2f}</code> "
+                    f"(<code>{df_btc['Close'].pct_change().iloc[-1] * 100:+.2f}%</code>)")
+    else:
+        btc_line = "🪙 <b>BTC:</b> N/A"
+
+    news_summary = "تغییرات نوسانی در بازار."
     raw_news = await fetch_crypto_news()
-    prompt = (
-        f"یه خلاصه کوتاه (۳ سطر) از اخبار کریپتو:\n{raw_news}\n\n"
-        "⚠️ فارسی، اما اصطلاحات (ETF, DeFi, Whale) انگلیسی."
-    )
-    try:
-        news_summary = await query_gemini(prompt)
-    except Exception:
-        news_summary = "تغییرات نوسانی در بازار."
+    if raw_news:
+        prompt = (
+            f"یه خلاصه کوتاه (۳ سطر) از اخبار کریپتو:\n{raw_news}\n\n"
+            "⚠️ فارسی، اما اصطلاحات (ETF, DeFi, Whale) انگلیسی."
+        )
+        try:
+            # escape ضروری است: یک '<' در خروجی Gemini کل بولتن را برای همه‌ی کاربران خراب می‌کرد
+            news_summary = format_ai_text(await query_gemini(prompt))
+        except Exception:
+            pass
     return (
         f"☀️ <b>بولتن روزانه AlphaEngine</b>\n\n"
-        f"🪙 <b>BTC:</b> <code>{btc_price:,.2f}</code> (<code>{btc_change:+.2f}%</code>)\n"
+        f"{btc_line}\n"
         f"📊 <b>شاخص ترس و طمع:</b> {fng_val}/100 ({fng_class})\n\n"
         f"📰 {news_summary}\n\n"
         f"📢 <a href=\"{CHANNEL_LINK}\">AlphaEngine Official</a>"
@@ -2530,26 +3022,43 @@ async def generate_daily_digest():
 
 
 async def daily_digest_scheduler():
+    """بولتن هر روز فقط یک بار و به وقت تهران.
+    روش قبلی (hour == 8 and minute == 0) به‌خاطر drift حلقه‌ی sleep(60) گاهی کل دقیقه را جا می‌انداخت،
+    و ساعت را هم به وقت UTC سرور می‌سنجید (یعنی ۱۱:۳۰ تهران)."""
     while True:
         await asyncio.sleep(60)
         try:
-            settings = await db_get_settings()
-            if not settings.get("daily_digest_enabled", True):
+            if not SYSTEM_SETTINGS.get("daily_digest_enabled", True):
                 continue
-            now = datetime.datetime.now()
-            if now.hour == 8 and now.minute == 0:
+            now = datetime.datetime.now(BOT_TZ)
+            # پنجره‌ی ۴ ساعته: اگر بات دیر بالا آمد، نصفه‌شب بولتن صبح ارسال نشود
+            if not (DIGEST_HOUR <= now.hour < DIGEST_HOUR + 4):
+                continue
+            today = now.strftime("%Y-%m-%d")
+            if await db_get_kv("last_digest_date") == today:
+                continue
+            await db_set_kv("last_digest_date", today)  # قبل از ارسال ثبت می‌شود؛ ری‌استارت = ارسال تکراری نیست
+            try:
                 digest = await generate_daily_digest()
-                users = await db_get_all_users(limit=10000)
-                for u in users:
-                    try:
-                        await bot.send_message(u["user_id"], digest, parse_mode="HTML", disable_web_page_preview=True)
-                        await asyncio.sleep(0.05)
-                    except Exception:
-                        pass
-                await send_to_channel(digest)
-                await asyncio.sleep(300)
+            except Exception:
+                await db_set_kv("last_digest_date", "")
+                raise
+            ids = await db_get_broadcast_ids("all")
+            spawn(broadcast_to(ids, digest, disable_web_page_preview=True))
+            await send_to_channel(digest)
         except Exception as e:
-            logging.error(f"Digest loop: {e}")
+            logging.error(f"Digest loop: {type(e).__name__}: {e}")
+
+
+# ============================================================
+# ================ چکر هشدار قیمت ===========================
+# ============================================================
+
+def _ticker_last(ticker) -> float:
+    try:
+        return float(ticker.get('last') or ticker.get('close') or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 async def background_alert_checker():
@@ -2559,39 +3068,71 @@ async def background_alert_checker():
             alerts = await db_get_all_alerts()
             if not alerts:
                 continue
-            exchange = ccxt.coinex()
-            try:
-                for alert in alerts:
-                    try:
-                        ticker = await exchange.fetch_ticker(alert["symbol"])
-                        current = float(ticker.get('last') or ticker.get('close') or 0)
-                        if current == 0: continue
-                        triggered = False
-                        if alert["condition"] == "above" and current >= alert["target_price"]:
-                            triggered = True
-                        elif alert["condition"] == "below" and current <= alert["target_price"]:
-                            triggered = True
-                        if triggered:
-                            await bot.send_message(
-                                chat_id=alert["user_id"],
-                                text=(
-                                    f"🚨 <b>هشدار قیمت!</b>\n\n"
-                                    f"🪙 <b>{alert['symbol']}</b>\n"
-                                    f"🎯 هدف: <code>{alert['target_price']}</code>\n"
-                                    f"💵 فعلی: <code>{current}</code>"
-                                ),
-                                parse_mode="HTML"
-                            )
-                            await db_delete_alert(alert["id"])
-                    except Exception as e:
-                        logging.error(f"Alert: {e}")
-            finally:
+            exchange = get_exchange()
+
+            # هر نماد فقط یک بار قیمت‌گیری می‌شود (قبلاً به‌ازای هر هشدار یک درخواست جدا بود)
+            symbols = sorted({a["symbol"] for a in alerts})
+            prices = {}
+            if len(symbols) > 5:
                 try:
-                    await exchange.close()
-                except Exception:
-                    pass
+                    tickers = await exchange.fetch_tickers()
+                    for s in symbols:
+                        if s in tickers:
+                            p = _ticker_last(tickers[s])
+                            if p > 0:
+                                prices[s] = p
+                except Exception as e:
+                    logging.warning(f"fetch_tickers failed: {type(e).__name__}")
+            else:
+                for s in symbols:
+                    try:
+                        p = _ticker_last(await exchange.fetch_ticker(s))
+                        if p > 0:
+                            prices[s] = p
+                    except Exception as e:
+                        logging.warning(f"Alert ticker {s}: {type(e).__name__}")
+
+            for alert in alerts:
+                current = prices.get(alert["symbol"])
+                if not current:
+                    continue
+                hit = ((alert["condition"] == "above" and current >= alert["target_price"])
+                       or (alert["condition"] == "below" and current <= alert["target_price"]))
+                if not hit:
+                    continue
+                # اول حذف، بعد ارسال: اگر کاربر بات را بلاک کرده باشد هشدار برای همیشه
+                # هر ۳۰ ثانیه دوباره تلاش نمی‌شود (قبلاً بی‌نهایت تکرار می‌شد)
+                if not await db_delete_alert(alert["id"]):
+                    continue
+                await safe_send(
+                    alert["user_id"],
+                    f"🚨 <b>هشدار قیمت!</b>\n\n"
+                    f"🪙 <b>{html.escape(alert['symbol'])}</b>\n"
+                    f"🎯 هدف: <code>{fmt_price(alert['target_price'])}</code>\n"
+                    f"💵 فعلی: <code>{fmt_price(current)}</code>",
+                    parse_mode="HTML"
+                )
         except Exception as e:
             logging.error(f"Alert loop: {type(e).__name__}: {e}")
+
+
+async def maintenance_loop():
+    """پاکسازی دوره‌ای دیکشنری‌های RAM تا با گذر زمان حافظه پر نشود."""
+    while True:
+        await asyncio.sleep(600)
+        try:
+            now = time.time()
+            for k in [k for k, v in market_cache.items() if v["expires"] <= now]:
+                market_cache.pop(k, None)
+            for uid in [u for u, ts in rate_limit.items() if not any(now - t < 60 for t in ts)]:
+                rate_limit.pop(uid, None)
+            for uid in [u for u, d in user_cache.items()
+                        if not d.get("state") and now - (d.get("state_updated") or 0) > 3600]:
+                user_cache.pop(uid, None)
+            for uid in [u for u, t in _last_touch.items() if now - t > 3600]:
+                _last_touch.pop(uid, None)
+        except Exception as e:
+            logging.error(f"Maintenance: {type(e).__name__}: {e}")
 
 
 async def handle_web(request):
@@ -2611,18 +3152,34 @@ async def main():
     except Exception as e:
         logging.warning(f"Load settings: {e}")
 
+    # Middleware باید قبل از شروع polling ثبت شود
+    dp.message.outer_middleware(BanAndTouchMiddleware())
+    dp.callback_query.outer_middleware(BanAndTouchMiddleware())
+
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
-    asyncio.create_task(background_alert_checker())
-    asyncio.create_task(daily_digest_scheduler())
-    asyncio.create_task(pump_dump_detector_loop())
+    tasks = [
+        asyncio.create_task(background_alert_checker()),
+        asyncio.create_task(daily_digest_scheduler()),
+        asyncio.create_task(pump_dump_detector_loop()),
+        asyncio.create_task(maintenance_loop()),
+    ]
 
     logging.info("🚀 Bot starting polling...")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await close_exchange()
+        await runner.cleanup()
+        if db_pool:
+            await db_pool.close()
 
 
 if __name__ == "__main__":
