@@ -65,7 +65,6 @@ for handler in logging.root.handlers:
 
 
 def _env_int(name: str, default: int) -> int:
-    """خواندن امن ENV عددی؛ اگر خراب بود به‌جای کرش، مقدار پیش‌فرض."""
     try:
         return int(os.getenv(name, str(default)))
     except ValueError:
@@ -81,7 +80,6 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 PAYMENT_CARD = os.getenv("PAYMENT_CARD", "0000-0000-0000-0000")
 PAYMENT_HOLDER = os.getenv("PAYMENT_HOLDER", "نام صاحب کارت")
 PAYMENT_AMOUNT = _env_int("PAYMENT_AMOUNT", 100000)
-# اگر VIP_PRICE_TOMAN ست نشده بود، از PAYMENT_AMOUNT ساخته می‌شود تا این دو هیچ‌وقت ناهماهنگ نشوند
 VIP_PRICE_TOMAN = os.getenv("VIP_PRICE_TOMAN") or f"{PAYMENT_AMOUNT:,}"
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@AlphaEngine_Official")
 CHANNEL_LINK = os.getenv("CHANNEL_LINK", "https://t.me/AlphaEngine_Official")
@@ -112,7 +110,6 @@ _AVAILABLE_GEMINI_MODELS = None
 
 # --- تنظیمات ---
 STATE_TIMEOUT_SECONDS = 300
-# مثلاً کاربر برای واریز پول به اپ بانک می‌رود؛ ۵ دقیقه برای ارسال فیش کم است
 STATE_TIMEOUTS = {"awaiting_payment_receipt": 3600}
 RATE_LIMIT_PER_MINUTE = 5
 MARKET_CACHE_TTL = 60
@@ -122,12 +119,12 @@ FREE_VIP_DAYS = 7
 POINTS_FOR_VIP = 10
 POINTS_PER_ANALYSIS = 1
 POINTS_PER_REFERRAL = 5
-MAX_ANALYSIS_POINTS_PER_DAY = 5   # جلوگیری از فارم کردن VIP رایگان با اسپم تحلیل
+MAX_ANALYSIS_POINTS_PER_DAY = 5
 MAX_ALERTS_PER_USER = 10
 MAX_VOICE_SECONDS = 60
 GEMINI_TIMEOUT_SECONDS = 40
-DIGEST_HOUR = 8                   # ساعت ارسال بولتن، به وقت تهران
-BOT_TZ = datetime.timezone(datetime.timedelta(hours=3, minutes=30))  # Asia/Tehran (بدون DST)
+DIGEST_HOUR = 8
+BOT_TZ = datetime.timezone(datetime.timedelta(hours=3, minutes=30))
 VALID_TIMEFRAMES = ("1m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w")
 SYSTEM_SETTINGS = {
     "pump_detector_enabled": True,
@@ -135,7 +132,6 @@ SYSTEM_SETTINGS = {
     "channel_broadcast_enabled": True,
 }
 
-# کاربر VIP فعال = is_vip و (بدون تاریخ انقضا یا تاریخ انقضا نگذشته)
 SQL_UTC_NOW = "(NOW() AT TIME ZONE 'UTC')"
 VIP_ACTIVE_SQL = (
     f"(COALESCE(is_vip, FALSE) = TRUE AND (vip_until IS NULL OR vip_until > {SQL_UTC_NOW}))"
@@ -163,7 +159,6 @@ PERSIAN_SYSTEM_INSTRUCTION = (
 # ============================================================
 
 def utcnow() -> datetime.datetime:
-    """زمان UTC بدون tzinfo؛ سازگار با ستون‌های TIMESTAMP."""
     return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
 
@@ -179,7 +174,6 @@ async def init_db():
         db_pool = await asyncpg.create_pool(
             clean_url, min_size=1, max_size=5,
             command_timeout=60, ssl='require',
-            # Neon کانکشن‌های idle را می‌بندد؛ قبل از آن خودمان بازیافتشان می‌کنیم
             max_inactive_connection_lifetime=120,
         )
 
@@ -298,12 +292,10 @@ async def _build_user(conn, row) -> dict:
 
 
 async def db_get_or_create_user(user_id: int) -> dict:
-    """کاربر را می‌خواند یا می‌سازد. کلید 'is_new' مشخص می‌کند همین الان ساخته شده یا نه."""
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
         is_new = False
         if row is None:
-            # ON CONFLICT: اگر دو پیام هم‌زمان بیایند، یکی‌شان خطای Duplicate نمی‌گیرد
             inserted = await conn.fetchval(
                 "INSERT INTO users (user_id, is_vip) VALUES ($1, $2) "
                 "ON CONFLICT (user_id) DO NOTHING RETURNING user_id",
@@ -319,7 +311,6 @@ async def db_get_or_create_user(user_id: int) -> dict:
 
 
 async def db_get_user(user_id: int):
-    """فقط می‌خواند و هرگز کاربر جدید نمی‌سازد (برای جستجوی ادمین). اگر نبود None."""
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
         return await _build_user(conn, row) if row else None
@@ -346,7 +337,6 @@ async def db_set_vip(user_id: int, is_vip: bool, days: int = 0):
 
 
 async def db_extend_vip(user_id: int, days: int):
-    """تمدید اتمیک؛ اگر VIP هنوز فعال است از تاریخ انقضای فعلی، وگرنه از الان حساب می‌کند."""
     async with db_pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", user_id
@@ -381,7 +371,6 @@ async def db_add_points(user_id: int, points: int):
 
 
 async def db_add_analysis_points(user_id: int) -> bool:
-    """امتیاز تحلیل؛ حداکثر MAX_ANALYSIS_POINTS_PER_DAY در روز. True اگر امتیاز داده شد."""
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("""
             UPDATE users
@@ -406,7 +395,6 @@ async def db_get_points(user_id: int) -> int:
 
 
 async def db_deduct_points(user_id: int, points: int) -> bool:
-    """کسر اتمیک: بررسی و کسر در یک دستور SQL تا با دو کلیک هم‌زمان دوبار کسر/استفاده نشود."""
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
             "UPDATE users SET points = points - $1 "
@@ -471,7 +459,6 @@ async def db_get_all_alerts() -> list:
 
 
 async def db_delete_alert(alert_id: int, user_id: int = None) -> bool:
-    """حذف هشدار؛ اگر user_id داده شود فقط مالک می‌تواند حذف کند. True اگر واقعاً حذف شد."""
     async with db_pool.acquire() as conn:
         if user_id is None:
             row = await conn.fetchrow(
@@ -546,7 +533,6 @@ async def db_get_all_users(limit: int = 20, order: str = "last_seen") -> list:
 
 
 async def db_get_broadcast_ids(target: str = "all") -> list:
-    """آیدی مخاطبان پیام همگانی (بدون کاربران بن‌شده). target: all | vip | free"""
     conditions = {
         "all": "TRUE",
         "vip": VIP_ACTIVE_SQL,
@@ -625,7 +611,6 @@ async def db_update_payment_request(req_id: int, status: str, note: str = None):
 
 
 async def db_resolve_payment(req_id: int, status: str, note: str = None):
-    """تعیین تکلیف اتمیک: فقط اگر هنوز pending باشد عوض می‌شود. (جلوگیری از تأیید دوباره با دوبار کلیک)"""
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("""
             UPDATE payment_requests
@@ -654,7 +639,6 @@ async def db_get_pending_payments() -> list:
 
 
 async def db_create_discount_code(created_by: int, days_valid: int = 7) -> str:
-    # secrets به‌جای random: کد قابل پیش‌بینی نباشد
     alphabet = string.ascii_uppercase + string.digits
     code = ''.join(secrets.choice(alphabet) for _ in range(8))
     expires = utcnow() + datetime.timedelta(days=days_valid)
@@ -667,7 +651,6 @@ async def db_create_discount_code(created_by: int, days_valid: int = 7) -> str:
 
 
 async def db_redeem_code(code: str, user_id: int):
-    """مصرف اتمیک کد: فقط یک نفر می‌تواند یک کد را بگیرد، حتی با ارسال هم‌زمان."""
     code = code.strip().upper()
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(f"""
@@ -708,8 +691,6 @@ _DIGIT_TABLE = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "012345
 
 
 def parse_number(text):
-    """عدد را از ورودی کاربر می‌خواند: ارقام فارسی/عربی، ویرگول هزارگان و ممیز فارسی را می‌فهمد.
-    نامعتبر (متن، nan، inf) → None"""
     if text is None:
         return None
     t = str(text).strip().translate(_DIGIT_TABLE)
@@ -724,8 +705,6 @@ def parse_number(text):
 
 
 def normalize_symbol(text):
-    """BTC / btc / BTCUSDT / BTC/USDT → 'BTC/USDT'. نامعتبر → None.
-    اعتبارسنجی سخت‌گیرانه، چون همین مقدار داخل callback_data (حداکثر ۶۴ بایت) و پیام‌های HTML می‌رود."""
     s = (text or "").strip().upper().replace(" ", "")
     if s.endswith("/USDT"):
         base = s[:-5]
@@ -739,7 +718,6 @@ def normalize_symbol(text):
 
 
 def fmt_price(x) -> str:
-    """قیمت را بدون نمای علمی و بدون گرد کردن مخرب برای ارزهای ریز (مثل PEPE) فرمت می‌کند."""
     x = float(x)
     if x == 0:
         return "0"
@@ -753,8 +731,6 @@ def fmt_price(x) -> str:
 
 
 def format_ai_text(text: str) -> str:
-    """خروجی Gemini را برای parse_mode=HTML تلگرام امن می‌کند.
-    بدون این کار، یک '<' یا '&' در متن (مثلاً «RSI < 30») کل پیام را با خطا رد می‌کند."""
     text = html.escape(text or "", quote=False)
     text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text, flags=re.S)
     text = re.sub(r"(?m)^[ \t]*[\*\-][ \t]+", "• ", text)
@@ -818,19 +794,18 @@ def cache_get(key: str):
 
 
 def cache_set(key: str, data, ttl: int = MARKET_CACHE_TTL):
-    if len(market_cache) > 300:  # جلوگیری از رشد بی‌پایان حافظه
+    if len(market_cache) > 300:
         now = time.time()
         for k in [k for k, v in market_cache.items() if v["expires"] <= now]:
             market_cache.pop(k, None)
     market_cache[key] = {"data": data, "expires": time.time() + ttl}
 
 
-# --- ارسال امن (Rate Limit تلگرام، کاربرانی که بات را بلاک کرده‌اند) ---
+# --- ارسال امن ---
 _bg_tasks = set()
 
 
 def spawn(coro):
-    """اجرای coroutine در پس‌زمینه با نگه داشتن رفرنس (وگرنه ممکن است garbage collect شود)."""
     task = asyncio.create_task(coro)
     _bg_tasks.add(task)
     task.add_done_callback(_bg_tasks.discard)
@@ -845,7 +820,7 @@ async def safe_send(chat_id, text: str, **kwargs) -> bool:
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after + 1)
         except TelegramForbiddenError:
-            return False  # کاربر بات را بلاک کرده
+            return False
         except Exception as e:
             logging.warning(f"send to {chat_id} failed: {type(e).__name__}")
             return False
@@ -862,7 +837,6 @@ async def broadcast_to(user_ids: list, text: str, **kwargs) -> int:
 
 
 async def send_chunked(msg: types.Message, message: types.Message, text: str):
-    """اولین تکه با edit پیام «در حال پردازش»، بقیه پیام جدید؛ اگر HTML خراب بود متن ساده."""
     chunks = chunk_text(text)
     try:
         await msg.edit_text(chunks[0], parse_mode="HTML")
@@ -874,7 +848,7 @@ async def send_chunked(msg: types.Message, message: types.Message, text: str):
             await message.answer(c)
 
 
-# --- یک Exchange مشترک (به‌جای ساخت و load_markets در هر درخواست) ---
+# --- Exchange مشترک ---
 _exchange = None
 
 
@@ -895,7 +869,7 @@ async def close_exchange():
         _exchange = None
 
 
-# --- Middleware: بن‌شده‌ها همه‌جا (نه فقط چند هندلر) بلاک می‌شوند ---
+# --- Middleware ---
 _last_touch = {}
 
 
@@ -924,6 +898,10 @@ class BanAndTouchMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
+# ============================================================
+# ==================== کیبوردها =============================
+# ============================================================
+
 def get_main_keyboard(user_id: int):
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -944,8 +922,8 @@ def get_admin_keyboard(user_id: int):
             [KeyboardButton(text="🚀 اسکنر ارزهای پامپی"), KeyboardButton(text="🐳 رادار توکن‌های جدید (DEX)")],
             [KeyboardButton(text="🔔 هشدار قیمت"), KeyboardButton(text="📰 اخبار و تحلیل احساسات")],
             [KeyboardButton(text="📊 شاخص ترس و طمع"), KeyboardButton(text="🧮 محاسبه ریسک")],
-            [KeyboardButton(text="💎 خرید VIP"), KeyboardButton(text="🎁 کد اشتراک")],
-            [KeyboardButton(text="📢 کانال ما"), KeyboardButton(text="👤 حساب کاربری")],
+            [KeyboardButton(text="🎁 کد اشتراک")],
+            [KeyboardButton(text="👤 حساب کاربری")],
             [KeyboardButton(text="⚙️ پنل ادمین")],
         ],
         resize_keyboard=True
@@ -1105,9 +1083,20 @@ async def get_available_models():
     global _AVAILABLE_GEMINI_MODELS
     if _AVAILABLE_GEMINI_MODELS is not None:
         return list(_AVAILABLE_GEMINI_MODELS)
-    preferred = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-2.0-flash-lite"]
+    # ⭐ مدل‌های جدید اضافه شدند
+    preferred = [
+        "gemini-3-flash",
+        "gemini-3-pro",
+        "gemini-3.1-pro-preview",
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite",
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-002",
+        "gemini-1.5-pro",
+    ]
     try:
-        # models.list() صفحه‌بندی تنبل است؛ باید داخل thread کامل خوانده شود، نه در event loop
         models = await asyncio.to_thread(lambda: list(gemini_client.models.list()))
         names = set()
         for m in models:
@@ -1118,12 +1107,13 @@ async def get_available_models():
                     names.add(m.name.replace("models/", ""))
             except Exception:
                 continue
+        # اول مدل‌های preferred که موجودند
         available = [m for m in preferred if m in names]
+        # اگه هیچ‌کدام از preferred ها نبودند، هر مدل متنی موجود رو انتخاب کن
         if not available:
-            # مدل‌های تصویر/صوت/embedding را کنار می‌گذاریم و حداکثر ۴ مدل متنی را نگه می‌داریم
-            skip = ("image", "tts", "embedding", "live", "audio", "vision", "robotics", "computer")
+            skip = ("image", "tts", "embedding", "live", "audio", "vision", "robotics", "computer", "learnlm")
             available = [n for n in sorted(names)
-                         if n.startswith("gemini-") and not any(s in n for s in skip)][:4]
+                         if n.startswith("gemini-") and not any(s in n for s in skip)][:6]
         if not available:
             raise RuntimeError("no usable Gemini model found")
         _AVAILABLE_GEMINI_MODELS = available
@@ -1131,11 +1121,12 @@ async def get_available_models():
         return list(available)
     except Exception as e:
         logging.warning(f"ListModels failed: {e}")
+        # در بدترین حالت، preferred رو برمی‌گردونیم (شاید کار کنه)
         return list(preferred)
 
 
 async def query_gemini(prompt: str) -> str:
-    models = await get_available_models()  # کپی است؛ حذف مدل از لیست وسط حلقه، عنصر بعدی را نمی‌پراند
+    models = await get_available_models()
     last_error = None
     for model_name in models:
         try:
@@ -1214,7 +1205,6 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 async def get_crypto_dataframe(symbol="BTC/USDT", timeframe="1h", limit=300):
-    # limit پیش‌فرض ۳۰۰ است: EMA200 روی ۱۰۰ کندل هنوز گرم نشده و عدد نادرست می‌دهد
     formatted_symbol = normalize_symbol(symbol)
     if not formatted_symbol:
         return None, None
@@ -1260,7 +1250,6 @@ async def fetch_orderbook_and_futures(symbol="BTC/USDT"):
 
 
 async def fetch_crypto_news():
-    """اخبار خام یا None. (قبلاً در خطا خبر ساختگی برمی‌گشت و به Gemini داده می‌شد.)"""
     cached = cache_get("news_raw")
     if cached is not None:
         return cached
@@ -1296,7 +1285,7 @@ async def scan_pump_candidates():
                 continue
             volume = data.get('quoteVolume') or 0
             change = data.get('percentage')
-            if change is None:  # بعضی تیکرها percentage ندارند؛ از open/last حساب می‌کنیم
+            if change is None:
                 o, last = data.get('open'), data.get('last')
                 change = ((last - o) / o * 100) if (o and last) else 0
             if volume >= MIN_PUMP_VOLUME_USD and change >= 2.0:
@@ -1310,7 +1299,6 @@ async def scan_pump_candidates():
 
 
 async def fetch_dex_tokens():
-    """لیست توکن‌ها یا None. (قبلاً در خطا داده‌ی ساختگی BONK/WIF به کاربر پولی نشان داده می‌شد.)"""
     cached = cache_get("dex_tokens")
     if cached is not None:
         return cached
@@ -1375,10 +1363,8 @@ async def send_to_channel(text: str, photo_bytes: bytes = None):
 # ============================================================
 
 def generate_custom_chart(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
-    # فقط ۱۲۰ کندل آخر رسم می‌شود؛ اندیکاتورها قبلاً روی داده‌ی بلندتر محاسبه شده‌اند
     df = df.tail(120).reset_index(drop=True)
     clean_symbol = symbol.replace("/", "")
-    # Figure مستقیم (نه pyplot): pyplot thread-safe نیست و این تابع داخل asyncio.to_thread اجرا می‌شود
     fig = Figure(figsize=(12, 7), facecolor='#f8f9fa')
     ax_main, ax_rsi = fig.subplots(2, 1, gridspec_kw={'height_ratios': [3, 1]})
     ax_main.set_facecolor('#ffffff')
@@ -1456,13 +1442,11 @@ def _yn(v) -> str:
 
 
 async def generate_signal(symbol: str, timeframe: str):
-    """خروجی: (متن HTML، بایت چارت یا None، موفق بودن)"""
     formatted_symbol, df = await get_crypto_dataframe(symbol, timeframe)
     if df is None or df.empty:
         return (f"⚠️ ارز <b>{html.escape(str(symbol))}</b> پیدا نشد یا داده‌ای برای این تایم‌فریم وجود ندارد.",
                 None, False)
 
-    # برای تشخیص روند (EMA50) حداقل ~۱۲۰ کندل لازم است؛ ۳۰ کندل قبلی EMA50 را بی‌معنی می‌کرد
     results = await asyncio.gather(
         get_crypto_dataframe(formatted_symbol, "1d", 120),
         get_crypto_dataframe(formatted_symbol, "4h", 120),
@@ -1491,7 +1475,6 @@ async def generate_signal(symbol: str, timeframe: str):
 
     price = fmt_price(df['Close'].iloc[-1])
     rsi = float(df['RSI'].iloc[-1])
-    # هر دو جهت به مدل داده می‌شود؛ قبلاً فقط FVG/OB صعودی می‌رفت و تحلیل به سمت Long سوگیری داشت
     fvg_bull = df['FVG_Bullish'].iloc[-3:].any()
     fvg_bear = df['FVG_Bearish'].iloc[-3:].any()
     ob_bull = df['OrderBlock_Bullish'].iloc[-5:].any()
@@ -1550,7 +1533,6 @@ async def generate_signal(symbol: str, timeframe: str):
     try:
         response_text = await query_gemini(prompt)
     except Exception as e:
-        # جزئیات خطا فقط در لاگ؛ به کاربر پیام عمومی نشان می‌دهیم
         logging.error(f"Gemini analysis failed: {type(e).__name__}: {e}")
         return "⚠️ سرویس تحلیل هوش مصنوعی موقتاً در دسترس نیست. چند دقیقه دیگر دوباره تلاش کنید.", None, False
 
@@ -1585,7 +1567,6 @@ async def handle_voice_message(message: types.Message):
         models = await get_available_models()
 
         def _convert_upload_analyze():
-            # pydub/ffmpeg و آپلود Gemini همگی blocking هستند؛ باید در thread اجرا شوند
             sound = AudioSegment.from_file(ogg_filename, format="ogg")
             sound.export(wav_filename, format="wav")
             uploaded = gemini_client.files.upload(file=wav_filename)
@@ -1610,7 +1591,6 @@ async def handle_voice_message(message: types.Message):
                     raise last_exc
                 return None
             finally:
-                # فایل آپلودشده روی سرور Gemini پاک شود (وگرنه تا ۴۸ ساعت می‌ماند)
                 try:
                     gemini_client.files.delete(name=uploaded.name)
                 except Exception:
@@ -1675,8 +1655,6 @@ async def start_cmd(message: types.Message):
     user = await db_get_or_create_user(user_id)
     set_user_state(user_id, None)
 
-    # فقط کاربر «کاملاً جدید» می‌تواند دعوت‌شده حساب شود؛
-    # قبلاً هر کاربر قدیمی هم با کلیک روی لینک دعوت، امتیاز به دعوت‌کننده می‌داد
     args = (message.text or "").split()
     if len(args) > 1 and args[1].isascii() and args[1].isdigit() and user.get("is_new"):
         referrer_id = int(args[1])
@@ -1693,7 +1671,6 @@ async def start_cmd(message: types.Message):
     user = await db_get_or_create_user(user_id)
     status_text = "✨ VIP" if user["is_vip"] else "Standard 🔑"
 
-    # استفاده از HTML — امن‌ترین حالت برای لینک و کاراکترهای خاص
     start_text = (
         f"🏛 <b>AlphaEngine Terminal Pro</b>\n"
         f"────────────────────────\n\n"
@@ -1765,7 +1742,6 @@ async def crypto_news_handler(message: types.Message):
         return
     msg = await message.answer("🔄 در حال دریافت آخرین اخبار...")
 
-    # خلاصه‌ی اخبار بین همه‌ی کاربران ۱۰ دقیقه کش می‌شود (صرفه‌جویی در سهمیه‌ی Gemini)
     cached = cache_get("news_summary")
     if cached:
         await send_chunked(msg, message, cached)
@@ -1848,7 +1824,6 @@ async def callback_delete_alert(callback: types.CallbackQuery):
     except (IndexError, ValueError):
         await callback.answer()
         return
-    # فقط مالک هشدار می‌تواند آن را حذف کند
     ok = await db_delete_alert(alert_id, callback.from_user.id)
     await callback.answer("🗑 حذف شد" if ok else "این هشدار قبلاً حذف شده.")
     try:
@@ -2025,8 +2000,6 @@ async def buy_vip_handler(message: types.Message):
             parse_mode="HTML"
         )
         return
-    # مهم: قبلاً این هندلر state را ست نمی‌کرد و ارسال فیش بعدش با
-    # «اول دکمه خرید VIP را بزن» رد می‌شد (فقط دکمه‌ی اینلاین state را ست می‌کرد)
     set_user_state(user_id, "awaiting_payment_receipt")
     await message.answer(
         f"💎 <b>خرید VIP</b>\n"
@@ -2151,7 +2124,6 @@ async def handle_payment_photo(message: types.Message):
     req_id = await db_create_payment_request(user_id, PAYMENT_AMOUNT, file_id)
     set_user_state(user_id, None)
 
-    # نام و یوزرنیم ورودی کاربر است؛ بدون escape، کاراکتری مثل & یا < پیام ادمین را خراب می‌کرد
     username = html.escape(message.from_user.username or "—")
     full_name = html.escape(message.from_user.full_name or "—")
 
@@ -2206,7 +2178,6 @@ async def payment_callbacks(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    # هر callback فقط یک بار answer می‌شود (بار دوم توسط تلگرام رد می‌شود)
     if action == "later":
         await callback.answer("⏸ بعداً بررسی می‌کنی.", show_alert=True)
         return
@@ -2214,7 +2185,6 @@ async def payment_callbacks(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    # تغییر وضعیت اتمیک: اگر ادمین دوبار روی «تأیید» بزند، VIP دوبار تمدید نمی‌شود
     new_status = "approved" if action == "approve" else "rejected"
     req = await db_resolve_payment(req_id, new_status)
     if not req:
@@ -2228,7 +2198,7 @@ async def payment_callbacks(callback: types.CallbackQuery):
             until = await db_extend_vip(target_uid, VIP_DURATION_DAYS)
         except Exception as e:
             logging.error(f"Extend VIP failed: {type(e).__name__}: {e}")
-            await db_update_payment_request(req_id, "pending")  # برگردان تا دوباره قابل تلاش باشد
+            await db_update_payment_request(req_id, "pending")
             await callback.message.answer("❌ خطا در فعال‌سازی VIP؛ دوباره تأیید را بزنید.")
             return
         await db_log_admin(user_id, f"Approved payment #{req_id} for {target_uid}")
@@ -2256,7 +2226,6 @@ async def payment_callbacks(callback: types.CallbackQuery):
         await callback.message.edit_caption(caption=(callback.message.caption or "") + suffix)
     except Exception:
         pass
-
 
 # ============================================================
 # ==================== پنل ادمین ============================
@@ -2299,7 +2268,6 @@ async def admin_callbacks(callback: types.CallbackQuery):
 
     data = callback.data.split(":")
     action = data[1] if len(data) > 1 else "back"
-    # اکشن‌هایی که خودشان یک alert نشان می‌دهند نباید قبلش answer بخورند
     if action not in ("setvip", "unvip", "ban", "unban"):
         await callback.answer()
 
@@ -2629,7 +2597,6 @@ async def admin_callbacks(callback: types.CallbackQuery):
 async def handle_timeframe_click(callback: types.CallbackQuery):
     user_id = callback.from_user.id
 
-    # callback_data از سمت کلاینت قابل جعل است؛ همیشه اعتبارسنجی می‌کنیم
     parts = callback.data.split(":")
     if len(parts) != 3 or parts[2] not in VALID_TIMEFRAMES or not normalize_symbol(parts[1]):
         await callback.answer("⚠️ درخواست نامعتبر.", show_alert=True)
@@ -2667,7 +2634,6 @@ async def handle_timeframe_click(callback: types.CallbackQuery):
                 except Exception:
                     await callback.message.answer(c)
 
-        # امتیاز فقط برای تحلیل موفق (قبلاً با ارز نامعتبر هم امتیاز داده می‌شد) و با سقف روزانه
         if ok and not is_admin(user_id):
             try:
                 await db_add_analysis_points(user_id)
@@ -2688,18 +2654,17 @@ async def handle_text_input(message: types.Message):
     user_id = message.from_user.id
     text = message.text.strip()
 
-    # ---------- stateهای ادمین ----------
     if is_admin(user_id) and user_id in admin_state:
         st = admin_state[user_id]
         if time.time() - st.get("ts", time.time()) > STATE_TIMEOUT_SECONDS:
-            admin_state.pop(user_id, None)  # state قدیمی ادمین، ورودی بعدی را نبلعد
+            admin_state.pop(user_id, None)
         elif st.get("action") == "awaiting_user_search":
             admin_state.pop(user_id, None)
             if not (text.isascii() and text.isdigit()):
                 await message.answer("⚠️ آیدی عددی وارد کن.")
                 return
             target_uid = int(text)
-            user = await db_get_user(target_uid)  # فقط می‌خواند؛ کاربر جدید نمی‌سازد
+            user = await db_get_user(target_uid)
             if not user:
                 await message.answer("❌ کاربر پیدا نشد.")
                 return
@@ -2723,7 +2688,7 @@ async def handle_text_input(message: types.Message):
             admin_state.pop(user_id, None)
             target = st.get("target")
             kind = {"bcast_all": "all", "bcast_vip": "vip", "bcast_free": "free"}.get(target, "all")
-            ids = await db_get_broadcast_ids(kind)  # کاربران بن‌شده و VIP منقضی‌شده لحاظ می‌شوند
+            ids = await db_get_broadcast_ids(kind)
             body = f"📢 <b>پیام از ادمین:</b>\n\n{html.escape(text)}"
             await message.answer(f"⏳ ارسال به <b>{len(ids)}</b> کاربر شروع شد...", parse_mode="HTML")
 
@@ -2737,7 +2702,6 @@ async def handle_text_input(message: types.Message):
             spawn(_run_broadcast())
             return
 
-    # ---------- stateهای کاربر ----------
     check_state_timeout(user_id)
     st_data = user_cache.setdefault(user_id, {})
     state = st_data.get("state")
@@ -2858,7 +2822,7 @@ async def handle_text_input(message: types.Message):
         return
 
     elif state == "awaiting_discount_code":
-        if not check_rate_limit(user_id):  # جلوگیری از حدس زدن کد
+        if not check_rate_limit(user_id):
             await message.answer("⏱ لطفاً کمی صبر کنید.")
             return
         code = text.strip().upper()
@@ -2876,7 +2840,6 @@ async def handle_text_input(message: types.Message):
             await message.answer(f"❌ {result['msg']}")
         return
 
-    # ---------- هر متن دیگری: تلاش برای تشخیص نماد ارز ----------
     if text.startswith("/"):
         return
 
@@ -2891,7 +2854,7 @@ async def handle_text_input(message: types.Message):
             )
         return
 
-    base = symbol.split("/")[0]  # در callback_data فقط BTC می‌رود تا از حد ۶۴ بایت دور بمانیم
+    base = symbol.split("/")[0]
     await message.answer(
         f"⏱ تایم‌فریم <b>{base}</b>:",
         reply_markup=timeframe_keyboard(base),
@@ -2906,7 +2869,6 @@ async def handle_text_input(message: types.Message):
 @dp.errors()
 async def global_error_handler(event: ErrorEvent):
     exc = event.exception
-    # «message is not modified» یعنی کاربر دوبار روی یک دکمه زده؛ خطا نیست
     if isinstance(exc, TelegramBadRequest) and "message is not modified" in str(exc):
         return True
     logging.error(f"Unhandled handler error: {type(exc).__name__}: {exc}")
@@ -2961,11 +2923,9 @@ async def pump_dump_detector_loop():
                         f"⚡️ <code>{cur_vol / avg_vol:.1f}X</code>\n"
                         f"💵 <code>{fmt_price(last['Close'])}</code>"
                     )
-                    # فقط VIPهای «فعال» (نه منقضی‌شده‌ها) و بدون بن‌شده‌ها
                     vip_ids = await db_get_broadcast_ids("vip")
                     if ADMIN_ID and ADMIN_ID not in vip_ids:
                         vip_ids.append(ADMIN_ID)
-                    # ارسال در پس‌زمینه؛ حلقه‌ی تشخیص برای هزاران ارسال متوقف نمی‌ماند
                     spawn(broadcast_to(vip_ids, alert_msg))
                     await send_to_channel(alert_msg)
                 except Exception as e:
@@ -3008,7 +2968,6 @@ async def generate_daily_digest():
             "⚠️ فارسی، اما اصطلاحات (ETF, DeFi, Whale) انگلیسی."
         )
         try:
-            # escape ضروری است: یک '<' در خروجی Gemini کل بولتن را برای همه‌ی کاربران خراب می‌کرد
             news_summary = format_ai_text(await query_gemini(prompt))
         except Exception:
             pass
@@ -3022,22 +2981,18 @@ async def generate_daily_digest():
 
 
 async def daily_digest_scheduler():
-    """بولتن هر روز فقط یک بار و به وقت تهران.
-    روش قبلی (hour == 8 and minute == 0) به‌خاطر drift حلقه‌ی sleep(60) گاهی کل دقیقه را جا می‌انداخت،
-    و ساعت را هم به وقت UTC سرور می‌سنجید (یعنی ۱۱:۳۰ تهران)."""
     while True:
         await asyncio.sleep(60)
         try:
             if not SYSTEM_SETTINGS.get("daily_digest_enabled", True):
                 continue
             now = datetime.datetime.now(BOT_TZ)
-            # پنجره‌ی ۴ ساعته: اگر بات دیر بالا آمد، نصفه‌شب بولتن صبح ارسال نشود
             if not (DIGEST_HOUR <= now.hour < DIGEST_HOUR + 4):
                 continue
             today = now.strftime("%Y-%m-%d")
             if await db_get_kv("last_digest_date") == today:
                 continue
-            await db_set_kv("last_digest_date", today)  # قبل از ارسال ثبت می‌شود؛ ری‌استارت = ارسال تکراری نیست
+            await db_set_kv("last_digest_date", today)
             try:
                 digest = await generate_daily_digest()
             except Exception:
@@ -3070,7 +3025,6 @@ async def background_alert_checker():
                 continue
             exchange = get_exchange()
 
-            # هر نماد فقط یک بار قیمت‌گیری می‌شود (قبلاً به‌ازای هر هشدار یک درخواست جدا بود)
             symbols = sorted({a["symbol"] for a in alerts})
             prices = {}
             if len(symbols) > 5:
@@ -3100,8 +3054,6 @@ async def background_alert_checker():
                        or (alert["condition"] == "below" and current <= alert["target_price"]))
                 if not hit:
                     continue
-                # اول حذف، بعد ارسال: اگر کاربر بات را بلاک کرده باشد هشدار برای همیشه
-                # هر ۳۰ ثانیه دوباره تلاش نمی‌شود (قبلاً بی‌نهایت تکرار می‌شد)
                 if not await db_delete_alert(alert["id"]):
                     continue
                 await safe_send(
@@ -3117,7 +3069,6 @@ async def background_alert_checker():
 
 
 async def maintenance_loop():
-    """پاکسازی دوره‌ای دیکشنری‌های RAM تا با گذر زمان حافظه پر نشود."""
     while True:
         await asyncio.sleep(600)
         try:
@@ -3152,7 +3103,6 @@ async def main():
     except Exception as e:
         logging.warning(f"Load settings: {e}")
 
-    # Middleware باید قبل از شروع polling ثبت شود
     dp.message.outer_middleware(BanAndTouchMiddleware())
     dp.callback_query.outer_middleware(BanAndTouchMiddleware())
 
