@@ -4,6 +4,7 @@ import io
 import html
 import math
 import time
+import json
 import string
 import asyncio
 import logging
@@ -32,8 +33,7 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     BufferedInputFile, ErrorEvent
 )
-from google import genai
-from google.genai import types as genai_types
+from openai import AsyncOpenAI
 from aiohttp import web
 
 # --- تنظیمات لاگینگ امن ---
@@ -41,6 +41,7 @@ class SensitiveFilter(logging.Filter):
     SENSITIVE_PATTERNS = [
         (re.compile(r'(postgresql://[^:]+:)[^@]+(@)'), r'\1***\2'),
         (re.compile(r'(bot\d*:)[A-Za-z0-9_\-]+'), r'\1***'),
+        (re.compile(r'(sk-or-v1-)[A-Za-z0-9\-]+'), r'\1***'),
         (re.compile(r'(AIza[A-Za-z0-9_\-]+)'), r'***'),
         (re.compile(r'(AQ\.[A-Za-z0-9_\-]+)'), r'***'),
         (re.compile(r'(npg_[A-Za-z0-9]+)'), r'***'),
@@ -74,7 +75,7 @@ def _env_int(name: str, default: int) -> int:
 
 # --- خواندن امن ENV ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 ADMIN_ID = _env_int("ADMIN_ID", 0)
 DATABASE_URL = os.getenv("DATABASE_URL")
 PAYMENT_CARD = os.getenv("PAYMENT_CARD", "0000-0000-0000-0000")
@@ -86,13 +87,20 @@ CHANNEL_LINK = os.getenv("CHANNEL_LINK", "https://t.me/AlphaEngine_Official")
 
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("❌ ENV 'TELEGRAM_BOT_TOKEN' or 'BOT_TOKEN' is not set!")
-if not GEMINI_API_KEY:
-    raise RuntimeError("❌ ENV 'GEMINI_API_KEY' is not set!")
+if not OPENROUTER_API_KEY:
+    raise RuntimeError("❌ ENV 'OPENROUTER_API_KEY' is not set!")
 if not DATABASE_URL:
     raise RuntimeError("❌ ENV 'DATABASE_URL' is not set!")
 
-# --- کلاینت Gemini ---
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+# --- کلاینت OpenRouter (سازگار با OpenAI SDK) ---
+ai_client = AsyncOpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY,
+    default_headers={
+        "HTTP-Referer": CHANNEL_LINK,
+        "X-Title": "AlphaEngine Bot",
+    },
+)
 
 # --- Bot & Dispatcher ---
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
@@ -106,7 +114,7 @@ user_cache = {}
 admin_state = {}
 rate_limit = {}
 market_cache = {}
-_AVAILABLE_GEMINI_MODELS = None
+_AVAILABLE_MODELS = None
 
 # --- تنظیمات ---
 STATE_TIMEOUT_SECONDS = 300
@@ -122,7 +130,7 @@ POINTS_PER_REFERRAL = 5
 MAX_ANALYSIS_POINTS_PER_DAY = 5
 MAX_ALERTS_PER_USER = 10
 MAX_VOICE_SECONDS = 60
-GEMINI_TIMEOUT_SECONDS = 40
+AI_TIMEOUT_SECONDS = 60
 DIGEST_HOUR = 8
 BOT_TZ = datetime.timezone(datetime.timedelta(hours=3, minutes=30))
 VALID_TIMEFRAMES = ("1m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w")
@@ -136,6 +144,20 @@ SQL_UTC_NOW = "(NOW() AT TIME ZONE 'UTC')"
 VIP_ACTIVE_SQL = (
     f"(COALESCE(is_vip, FALSE) = TRUE AND (vip_until IS NULL OR vip_until > {SQL_UTC_NOW}))"
 )
+
+# --- لیست مدل‌های رایگان OpenRouter ---
+OPENROUTER_MODELS = [
+    "google/gemini-2.0-flash-exp:free",
+    "google/gemini-flash-1.5:free",
+    "google/gemini-flash-1.5-8b:free",
+    "meta-llama/llama-3.1-8b-instruct:free",
+    "meta-llama/llama-3.2-3b-instruct:free",
+    "google/gemma-2-9b-it:free",
+    "qwen/qwen-2.5-7b-instruct:free",
+    "microsoft/phi-3-mini-128k-instruct:free",
+    "mistralai/mistral-7b-instruct:free",
+    "huggingfaceh4/zephyr-7b-beta:free",
+]
 
 # --- دستور سیستمی ---
 PERSIAN_SYSTEM_INSTRUCTION = (
@@ -1076,83 +1098,72 @@ def vip_action_keyboard(target_uid: int, is_vip: bool, is_banned: bool):
 
 
 # ============================================================
-# ================ لیست داینامیک Gemini ======================
+# ================ لیست داینامیک مدل‌های OpenRouter ==========
 # ============================================================
 
 async def get_available_models():
-    global _AVAILABLE_GEMINI_MODELS
-    if _AVAILABLE_GEMINI_MODELS is not None:
-        return list(_AVAILABLE_GEMINI_MODELS)
-    # ⭐ مدل‌های جدید اضافه شدند
-    preferred = [
-        "gemini-3-flash",
-        "gemini-3-pro",
-        "gemini-3.1-pro-preview",
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
-        "gemini-2.0-flash",
-        "gemini-2.0-flash-lite",
-        "gemini-1.5-flash",
-        "gemini-1.5-flash-002",
-        "gemini-1.5-pro",
-    ]
+    global _AVAILABLE_MODELS
+    if _AVAILABLE_MODELS is not None:
+        return list(_AVAILABLE_MODELS)
+
     try:
-        models = await asyncio.to_thread(lambda: list(gemini_client.models.list()))
-        names = set()
-        for m in models:
-            try:
-                actions = (getattr(m, "supported_actions", None)
-                           or getattr(m, "supported_generation_methods", None) or [])
-                if "generateContent" in actions:
-                    names.add(m.name.replace("models/", ""))
-            except Exception:
-                continue
-        # اول مدل‌های preferred که موجودند
-        available = [m for m in preferred if m in names]
-        # اگه هیچ‌کدام از preferred ها نبودند، هر مدل متنی موجود رو انتخاب کن
-        if not available:
-            skip = ("image", "tts", "embedding", "live", "audio", "vision", "robotics", "computer", "learnlm")
-            available = [n for n in sorted(names)
-                         if n.startswith("gemini-") and not any(s in n for s in skip)][:6]
-        if not available:
-            raise RuntimeError("no usable Gemini model found")
-        _AVAILABLE_GEMINI_MODELS = available
-        logging.info(f"✅ Available Gemini models: {available}")
-        return list(available)
+        # گرفتن لیست مدل‌های در دسترس از OpenRouter
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://openrouter.ai/api/v1/models",
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    all_models = [m.get("id", "") for m in data.get("data", [])]
+                    # فقط مدل‌های رایگان رو انتخاب کن
+                    free_models = [m for m in all_models if m.endswith(":free")]
+                    # اولویت‌بندی
+                    available = [m for m in OPENROUTER_MODELS if m in free_models]
+                    # اگه هیچ‌کدوم از لیست نبود، هر مدل رایگان دیگه رو بردار
+                    if not available:
+                        available = free_models[:8]
+                    if available:
+                        _AVAILABLE_MODELS = available
+                        logging.info(f"✅ Available free models: {available[:3]}...")
+                        return list(available)
     except Exception as e:
-        logging.warning(f"ListModels failed: {e}")
-        # در بدترین حالت، preferred رو برمی‌گردونیم (شاید کار کنه)
-        return list(preferred)
+        logging.warning(f"Fetching models failed: {type(e).__name__}: {e}")
+
+    _AVAILABLE_MODELS = list(OPENROUTER_MODELS)
+    return list(OPENROUTER_MODELS)
 
 
-async def query_gemini(prompt: str) -> str:
+async def query_ai(prompt: str) -> str:
+    """ارسال درخواست به OpenRouter با fallback به مدل‌های مختلف"""
     models = await get_available_models()
     last_error = None
     for model_name in models:
         try:
             response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    gemini_client.models.generate_content,
+                ai_client.chat.completions.create(
                     model=model_name,
-                    contents=prompt,
-                    config=genai_types.GenerateContentConfig(
-                        system_instruction=PERSIAN_SYSTEM_INSTRUCTION,
-                        temperature=0.7,
-                    ),
+                    messages=[
+                        {"role": "system", "content": PERSIAN_SYSTEM_INSTRUCTION},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.7,
+                    max_tokens=2000,
                 ),
-                timeout=GEMINI_TIMEOUT_SECONDS,
+                timeout=AI_TIMEOUT_SECONDS,
             )
-            text = response.text if response else None
-            if text:
-                return text
+            if response and response.choices and response.choices[0].message.content:
+                return response.choices[0].message.content
         except Exception as e:
             last_error = e
-            logging.warning(f"Gemini '{model_name}' failed: {type(e).__name__}")
-            err_str = str(e)
-            if ("404" in err_str or "NOT_FOUND" in err_str) and _AVAILABLE_GEMINI_MODELS \
-                    and model_name in _AVAILABLE_GEMINI_MODELS:
-                _AVAILABLE_GEMINI_MODELS.remove(model_name)
-    raise last_error or RuntimeError("هیچ‌کدام از مدل‌های Gemini پاسخ ندادند.")
+            logging.warning(f"Model '{model_name}' failed: {type(e).__name__}: {str(e)[:100]}")
+            # اگه مدل خطای ۴۰۴ یا ۴۲۹ داد، از لیست حذفش کن
+            err_str = str(e).lower()
+            if any(x in err_str for x in ("404", "not found", "429", "rate limit", "no endpoints")):
+                if _AVAILABLE_MODELS and model_name in _AVAILABLE_MODELS:
+                    _AVAILABLE_MODELS.remove(model_name)
+            continue
+    raise last_error or RuntimeError("هیچ‌کدام از مدل‌های AI پاسخ ندادند.")
 
 
 # ============================================================
@@ -1531,9 +1542,9 @@ async def generate_signal(symbol: str, timeframe: str):
 """
 
     try:
-        response_text = await query_gemini(prompt)
+        response_text = await query_ai(prompt)
     except Exception as e:
-        logging.error(f"Gemini analysis failed: {type(e).__name__}: {e}")
+        logging.error(f"AI analysis failed: {type(e).__name__}: {e}")
         return "⚠️ سرویس تحلیل هوش مصنوعی موقتاً در دسترس نیست. چند دقیقه دیگر دوباره تلاش کنید.", None, False
 
     chart_bytes = None
@@ -1564,43 +1575,14 @@ async def handle_voice_message(message: types.Message):
     try:
         file = await bot.get_file(message.voice.file_id)
         await bot.download_file(file.file_path, destination=ogg_filename)
-        models = await get_available_models()
 
-        def _convert_upload_analyze():
-            sound = AudioSegment.from_file(ogg_filename, format="ogg")
-            sound.export(wav_filename, format="wav")
-            uploaded = gemini_client.files.upload(file=wav_filename)
-            try:
-                prompt = (
-                    "این یک فایل صوتی از کاربر در مورد بازار کریپتو است. "
-                    "متن صحبت او را متوجه شو، سوال یا درخواست او را بررسی کن و پاسخ جامع بده.\n\n"
-                    "⚠️ توضیحات فارسی، اصطلاحات تکنیکال انگلیسی."
-                )
-                last_exc = None
-                for m_name in models:
-                    try:
-                        resp = gemini_client.models.generate_content(
-                            model=m_name, contents=[uploaded, prompt],
-                            config=genai_types.GenerateContentConfig(system_instruction=PERSIAN_SYSTEM_INSTRUCTION),
-                        )
-                        if resp and resp.text:
-                            return resp.text
-                    except Exception as ex:
-                        last_exc = ex
-                if last_exc:
-                    raise last_exc
-                return None
-            finally:
-                try:
-                    gemini_client.files.delete(name=uploaded.name)
-                except Exception:
-                    pass
-
-        response_text = await asyncio.wait_for(asyncio.to_thread(_convert_upload_analyze), timeout=180)
-        if response_text:
-            await send_chunked(msg, message, f"🗣 <b>پاسخ دستیار صوتی:</b>\n\n{format_ai_text(response_text)}")
-        else:
-            await msg.edit_text("⚠️ متنی از فایل صوتی تشخیص داده نشد.")
+        # توجه: OpenRouter از آپلود فایل پشتیبانی نمی‌کند.
+        # پس ویس را با یک تبدیل ساده به متن (اگه مدل پشتیبانی کند) یا ارسال متن پیام
+        # راه‌حل: از کاربر می‌خواهیم متن بفرستد (فعلاً).
+        await msg.edit_text(
+            "⚠️ تحلیل صوتی در این نسخه به صورت موقت غیرفعال است.\n\n"
+            "لطفاً متن سوال یا درخواست خود را ارسال کنید. 🙏"
+        )
     except Exception as e:
         logging.error(f"Voice error: {type(e).__name__}: {e}")
         await msg.edit_text("⚠️ خطا در پردازش فایل صوتی. لطفاً دوباره تلاش کنید.")
@@ -1622,7 +1604,6 @@ async def help_cmd(message: types.Message):
     await message.answer(
         "📚 <b>راهنمای بات AlphaEngine</b>\n\n"
         "🔹 <b>تحلیل ارز:</b> نام نماد رو بفرست (مثل <code>BTC</code>)\n"
-        "🔹 <b>تحلیل صوتی:</b> یه ویس بفرست\n"
         "🔹 <b>هشدار قیمت:</b> دکمه 🔔 هشدار قیمت\n"
         "🔹 <b>محاسبه ریسک:</b> دکمه 🧮 محاسبه ریسک\n"
         "🔹 <b>خرید VIP:</b> دکمه 💎 خرید VIP\n"
@@ -1679,7 +1660,7 @@ async def start_cmd(message: types.Message):
         f"📡 <b>وضعیت اتصال:</b> آنلاین 🟢\n\n"
         f"💡 <b>راهنمای سریع:</b>\n"
         f"برای دریافت ستاپ معاملاتی و چارت تحلیلی، کافی است <b>نام نماد</b> "
-        f"(مانند <code>BTC</code> یا <code>SOL</code>) را ارسال کرده یا ویس بفرستید.\n\n"
+        f"(مانند <code>BTC</code> یا <code>SOL</code>) را ارسال کنید.\n\n"
         f"📢 <b>کانال ما:</b> <a href=\"{CHANNEL_LINK}\">AlphaEngine Official</a>"
     )
 
@@ -1757,7 +1738,7 @@ async def crypto_news_handler(message: types.Message):
         "⚠️ توضیحات و تحلیل را فارسی بنویس، اما نام ارزها و اصطلاحات (ETF, DeFi, Whale, Market Cap) را انگلیسی نگه دار."
     )
     try:
-        response_text = await query_gemini(prompt)
+        response_text = await query_ai(prompt)
     except Exception:
         await msg.edit_text(f"📰 خلاصه اخبار (بدون تحلیل هوش مصنوعی):\n\n{raw_news[:1000]}")
         return
@@ -2968,7 +2949,7 @@ async def generate_daily_digest():
             "⚠️ فارسی، اما اصطلاحات (ETF, DeFi, Whale) انگلیسی."
         )
         try:
-            news_summary = format_ai_text(await query_gemini(prompt))
+            news_summary = format_ai_text(await query_ai(prompt))
         except Exception:
             pass
     return (
